@@ -36,26 +36,42 @@
       margin-bottom: 1.2rem;
     }
 
-    #start-btn {
+    #start-btn, #stop-btn {
       padding: 0.7rem 2rem;
       font-size: 0.95rem;
       font-weight: 600;
       border: none;
       border-radius: 8px;
       cursor: pointer;
-      background: linear-gradient(135deg, #3b82f6, #6366f1);
       color: #fff;
       transition: transform 0.15s, box-shadow 0.15s;
+    }
+
+    #start-btn {
+      background: linear-gradient(135deg, #3b82f6, #6366f1);
       box-shadow: 0 2px 12px rgba(99, 102, 241, 0.3);
       margin-bottom: 1.2rem;
     }
 
-    #start-btn:hover {
+    #start-btn:hover, #stop-btn:hover {
       transform: translateY(-1px);
+    }
+
+    #start-btn:hover {
       box-shadow: 0 4px 20px rgba(99, 102, 241, 0.5);
     }
 
-    #start-btn:disabled {
+    #stop-btn {
+      background: linear-gradient(135deg, #ef4444, #dc2626);
+      box-shadow: 0 2px 12px rgba(239, 68, 68, 0.3);
+      display: none;
+    }
+
+    #stop-btn:hover {
+      box-shadow: 0 4px 20px rgba(239, 68, 68, 0.5);
+    }
+
+    #start-btn:disabled, #stop-btn:disabled {
       opacity: 0.5;
       cursor: not-allowed;
       transform: none;
@@ -164,10 +180,12 @@
     }
 
     #camera-video {
-      position: absolute;
-      width: 0;
-      height: 0;
-      opacity: 0;
+      position: fixed;
+      top: -9999px;
+      left: -9999px;
+      width: 1px;
+      height: 1px;
+      opacity: 0.01;
       pointer-events: none;
     }
   </style>
@@ -178,7 +196,10 @@
 
   <div id="error-msg"></div>
 
-  <button id="start-btn">Start Camera</button>
+  <div style="display: flex; gap: 0.8rem; margin-bottom: 1.2rem;">
+    <button id="start-btn">Start Camera</button>
+    <button id="stop-btn">Stop Camera</button>
+  </div>
 
   <div class="controls" id="controls" style="display: none;">
     <div class="control-group">

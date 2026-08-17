@@ -3,7 +3,7 @@
  */
 
 import { initWebGPU } from './webgpu-context.js';
-import { startCapture, importFrame } from './capture.js';
+import { startCapture, importFrame, stopCapture } from './capture.js';
 import { GrayscalePass } from './pipeline/grayscale.js';
 import { PyramidBuilder } from './pipeline/pyramid.js';
 import { OpticalFlowPass } from './pipeline/optical-flow.js';
@@ -23,6 +23,7 @@ const gpuCanvas = document.getElementById('gpu-canvas');
 const arrowCanvas = document.getElementById('arrow-canvas');
 const video = document.getElementById('camera-video');
 const startBtn = document.getElementById('start-btn');
+const stopBtn = document.getElementById('stop-btn');
 const errorMsg = document.getElementById('error-msg');
 const controls = document.getElementById('controls');
 const fpsValue = document.getElementById('fps-value');
@@ -40,6 +41,7 @@ let compositePipeline, compositeSampler;
 let frameCount = 0;
 let hasFirstFrame = false;
 let isReadingBack = false;
+let isRunning = false;
 let lastFpsTime = performance.now();
 let fpsFrameCount = 0;
 
@@ -98,11 +100,13 @@ function resizeCanvases() {
 // ── Main Init ──────────────────────────────────────────────────────
 async function init() {
   try {
-    // Init WebGPU
-    const gpuInit = await initWebGPU(gpuCanvas);
-    device = gpuInit.device;
-    context = gpuInit.context;
-    canvasFormat = gpuInit.format;
+    // Init WebGPU (only once)
+    if (!device) {
+      const gpuInit = await initWebGPU(gpuCanvas);
+      device = gpuInit.device;
+      context = gpuInit.context;
+      canvasFormat = gpuInit.format;
+    }
 
     resizeCanvases();
     window.addEventListener('resize', resizeCanvases);
@@ -146,6 +150,7 @@ async function init() {
     resValue.textContent = `${WORKING_WIDTH}×${WORKING_HEIGHT}`;
     controls.style.display = 'flex';
     startBtn.style.display = 'none';
+    stopBtn.style.display = 'inline-block';
 
     // Bind UI controls
     heatmapOpacityInput.addEventListener('input', () => {
@@ -164,6 +169,9 @@ async function init() {
     await new Promise((r) => setTimeout(r, 200));
 
     // Start frame loop
+    isRunning = true;
+    hasFirstFrame = false;
+    frameCount = 0;
     requestFrame();
   } catch (err) {
     showError(err.message);
@@ -171,8 +179,37 @@ async function init() {
   }
 }
 
+// ── Stop Camera ────────────────────────────────────────────────────
+function stop() {
+  isRunning = false;
+
+  if (capture) {
+    stopCapture(capture);
+    capture = null;
+  }
+
+  // Clear canvases
+  if (vectorOverlay) {
+    vectorOverlay.destroy();
+  }
+
+  // Reset UI
+  startBtn.style.display = 'inline-block';
+  startBtn.disabled = false;
+  startBtn.textContent = 'Start Camera';
+  stopBtn.style.display = 'none';
+  controls.style.display = 'none';
+  fpsValue.textContent = '—';
+  flowTimeEl.textContent = '—';
+  resValue.textContent = '—';
+  hasFirstFrame = false;
+  isReadingBack = false;
+}
+
 // ── Frame Loop ─────────────────────────────────────────────────────
 function requestFrame() {
+  if (!isRunning) return;
+
   // Prefer requestVideoFrameCallback for accurate per-frame timing
   if ('requestVideoFrameCallback' in HTMLVideoElement.prototype) {
     video.requestVideoFrameCallback(onFrame);
@@ -182,15 +219,17 @@ function requestFrame() {
 }
 
 async function onFrame() {
+  if (!isRunning) return;
+
   // Schedule next frame immediately
   requestFrame();
 
   // Wait for all pipelines to be ready
   if (
-    !grayscalePass.ready ||
-    !pyramidBuilder.ready ||
-    !opticalFlowPass.ready ||
-    !heatmapPass.ready ||
+    !grayscalePass?.ready ||
+    !pyramidBuilder?.ready ||
+    !opticalFlowPass?.ready ||
+    !heatmapPass?.ready ||
     !compositePipeline
   ) {
     return;
@@ -298,11 +337,16 @@ async function onFrame() {
   frameCount++;
 }
 
-// ── Start Button Handler ───────────────────────────────────────────
+// ── Button Handlers ────────────────────────────────────────────────
 startBtn.addEventListener('click', () => {
   startBtn.disabled = true;
   startBtn.textContent = 'Starting…';
+  errorMsg.style.display = 'none';
   init();
+});
+
+stopBtn.addEventListener('click', () => {
+  stop();
 });
 
 // Feature detection on load

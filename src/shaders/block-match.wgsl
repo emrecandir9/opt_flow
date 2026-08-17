@@ -7,7 +7,7 @@ struct Params {
   width:        u32,  // Working resolution width
   height:       u32,  // Working resolution height
   blockSize:    u32,  // Block size (8)
-  searchRadius: u32,  // Search radius (8)
+  searchRadius: u32,  // Search radius (12)
 };
 
 @group(0) @binding(0) var currFrame: texture_2d<f32>;
@@ -17,7 +17,6 @@ struct Params {
 
 @compute @workgroup_size(8, 8)
 fn main(@builtin(global_invocation_id) gid: vec3u) {
-  // Each invocation = one block
   let blocksX = (params.width + params.blockSize - 1u) / params.blockSize;
   let blocksY = (params.height + params.blockSize - 1u) / params.blockSize;
 
@@ -28,11 +27,10 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
   let blockX = gid.x * params.blockSize;
   let blockY = gid.y * params.blockSize;
 
-  // 1. Check block texture variance (contrast)
+  // 1. Measure block contrast and compute zero-displacement SAD
   var minLuma = 1.0;
   var maxLuma = 0.0;
   var sadZero = 0.0;
-  var validPixels = 0.0;
 
   for (var by = 0u; by < params.blockSize; by++) {
     for (var bx = 0u; bx < params.blockSize; bx++) {
@@ -44,28 +42,12 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
         minLuma = min(minLuma, currVal);
         maxLuma = max(maxLuma, currVal);
         sadZero += abs(currVal - prevVal);
-        validPixels += 1.0;
       }
     }
   }
 
-  // If the block is flat (low contrast) or temporal diff is tiny noise, no motion
-  let contrast = maxLuma - minLuma;
-  if (contrast < 0.015 || (sadZero / max(validPixels, 1.0)) < 0.008) {
-    for (var by = 0u; by < params.blockSize; by++) {
-      for (var bx = 0u; bx < params.blockSize; bx++) {
-        let wx = blockX + bx;
-        let wy = blockY + by;
-        if (wx < params.width && wy < params.height) {
-          textureStore(flowOut, vec2u(wx, wy), vec4f(0.0, 0.0, 0.0, 0.0));
-        }
-      }
-    }
-    return;
-  }
-
-  // 2. Search for best displacement
-  var bestSAD = sadZero;
+  // 2. Search over candidate displacements
+  var bestCost = sadZero;
   var bestDx = 0;
   var bestDy = 0;
 
@@ -101,26 +83,34 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
         }
       }
 
-      // Small penalty for larger displacements to prefer smaller motion
-      let distCost = f32(dx * dx + dy * dy) * 0.003;
-      let totalCost = sad + distCost;
+      // Smooth distance penalty
+      let distCost = f32(dx * dx + dy * dy) * 0.0004;
+      let cost = sad + distCost;
 
-      // Only update if significantly better than current best
-      if (totalCost < bestSAD * 0.96) {
-        bestSAD = totalCost;
+      if (cost < bestCost) {
+        bestCost = cost;
         bestDx = dx;
         bestDy = dy;
       }
     }
   }
 
-  // Write the motion vector for each pixel in this block
+  // If the best displacement is not at least 5% better than zero displacement,
+  // or if the block has virtually zero contrast, stay at (0, 0)
+  let contrast = maxLuma - minLuma;
+  if (bestCost >= sadZero * 0.95 || contrast < 0.005) {
+    bestDx = 0;
+    bestDy = 0;
+  }
+
+  // 3. Write flow vector to all pixels in this block
+  let outVec = vec4f(f32(bestDx), f32(bestDy), 0.0, 0.0);
   for (var by = 0u; by < params.blockSize; by++) {
     for (var bx = 0u; bx < params.blockSize; bx++) {
       let wx = blockX + bx;
       let wy = blockY + by;
       if (wx < params.width && wy < params.height) {
-        textureStore(flowOut, vec2u(wx, wy), vec4f(f32(bestDx), f32(bestDy), 0.0, 0.0));
+        textureStore(flowOut, vec2u(wx, wy), outVec);
       }
     }
   }

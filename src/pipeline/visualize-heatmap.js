@@ -19,14 +19,6 @@ export class HeatmapPass {
     });
     this.setParams(6.0, 0.7);
 
-    // Sampler for flow texture
-    this.sampler = device.createSampler({
-      magFilter: 'linear',
-      minFilter: 'linear',
-      addressModeU: 'clamp-to-edge',
-      addressModeV: 'clamp-to-edge',
-    });
-
     this.pipeline = null;
     this._initPipeline();
   }
@@ -53,7 +45,7 @@ export class HeatmapPass {
             format: this.canvasFormat,
             blend: {
               color: {
-                srcFactor: 'src-alpha',
+                srcFactor: 'one',
                 dstFactor: 'one-minus-src-alpha',
                 operation: 'add',
               },
@@ -100,8 +92,7 @@ export class HeatmapPass {
       layout: this.pipeline.getBindGroupLayout(0),
       entries: [
         { binding: 0, resource: flowTexture.createView() },
-        { binding: 1, resource: this.sampler },
-        { binding: 2, resource: { buffer: this.uniformBuffer } },
+        { binding: 1, resource: { buffer: this.uniformBuffer } },
       ],
     });
 

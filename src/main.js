@@ -14,13 +14,14 @@ import { PyramidBuilder } from './pipeline/pyramid.js';
 import { OpticalFlowPass } from './pipeline/optical-flow.js';
 import { HeatmapPass } from './pipeline/visualize-heatmap.js';
 import { VectorOverlay } from './pipeline/visualize-vectors.js';
+import { createGrayscaleTexture } from './utils/texture-utils.js';
 
 // ── Configuration ──────────────────────────────────────────────────
 const WORKING_WIDTH = 480;
 const WORKING_HEIGHT = 270;
 const PYRAMID_LEVELS = 4;
 const BLOCK_SIZE = 8;
-const SEARCH_RADIUS = 8;
+const SEARCH_RADIUS = 12;
 const ARROW_GRID_SPACING = 12;
 
 // ── DOM Elements ───────────────────────────────────────────────────
@@ -37,7 +38,8 @@ const flowTimeEl = document.getElementById('flow-time');
 const resValue = document.getElementById('res-value');
 const heatmapOpacityInput = document.getElementById('heatmap-opacity');
 const arrowsToggle = document.getElementById('arrows-toggle');
-const resolutionSelect = document.getElementById('resolution-select');
+const sensitivitySelect = document.getElementById('sensitivity-select');
+const simBtn = document.getElementById('sim-btn');
 
 // ── 2D contexts ────────────────────────────────────────────────────
 const videoCtx = videoCanvas.getContext('2d');
@@ -45,11 +47,12 @@ const videoCtx = videoCanvas.getContext('2d');
 // ── State ──────────────────────────────────────────────────────────
 let device, context, canvasFormat;
 let capture;
-let grayscalePass, pyramidBuilder, opticalFlowPass, heatmapPass, vectorOverlay;
+let grayscalePass, prevGrayscaleTexture, pyramidBuilder, opticalFlowPass, heatmapPass, vectorOverlay;
 let frameCount = 0;
 let hasFirstFrame = false;
 let isReadingBack = false;
 let isRunning = false;
+let simMode = false;
 let lastFpsTime = performance.now();
 let fpsFrameCount = 0;
 
@@ -63,8 +66,8 @@ function showError(msg) {
 // ── Canvas Sizing ──────────────────────────────────────────────────
 function resizeCanvases() {
   const container = gpuCanvas.parentElement;
-  const w = container.clientWidth;
-  const h = container.clientHeight;
+  const w = container.clientWidth || 960;
+  const h = container.clientHeight || 540;
 
   videoCanvas.width = w;
   videoCanvas.height = h;
@@ -72,6 +75,14 @@ function resizeCanvases() {
   gpuCanvas.height = h;
   arrowCanvas.width = w;
   arrowCanvas.height = h;
+
+  if (context && device) {
+    context.configure({
+      device,
+      format: canvasFormat,
+      alphaMode: 'premultiplied',
+    });
+  }
 
   if (vectorOverlay) {
     vectorOverlay.resize(w, h);
@@ -105,6 +116,13 @@ async function init() {
       WORKING_HEIGHT
     );
 
+    prevGrayscaleTexture = createGrayscaleTexture(
+      device,
+      WORKING_WIDTH,
+      WORKING_HEIGHT,
+      'prev-grayscale'
+    );
+
     pyramidBuilder = new PyramidBuilder(device, WORKING_WIDTH, WORKING_HEIGHT, PYRAMID_LEVELS);
 
     opticalFlowPass = new OpticalFlowPass(
@@ -132,16 +150,25 @@ async function init() {
     stopBtn.style.display = 'inline-block';
 
     // Bind UI controls
-    heatmapOpacityInput.addEventListener('input', () => {
-      const opacity = parseInt(heatmapOpacityInput.value) / 100;
-      heatmapPass.setParams(6.0, opacity);
+    document.getElementById('heatmap-opacity')?.addEventListener('input', (e) => {
+      const opacity = parseInt(e.target.value) / 100;
+      heatmapPass?.setParams(6.0, opacity);
     });
 
-    arrowsToggle.addEventListener('change', () => {
-      vectorOverlay.enabled = arrowsToggle.value === 'on';
-      if (!vectorOverlay.enabled) {
-        vectorOverlay.draw(); // Clear arrows
+    document.getElementById('arrows-toggle')?.addEventListener('change', (e) => {
+      if (vectorOverlay) {
+        vectorOverlay.enabled = e.target.value === 'on';
+        if (!vectorOverlay.enabled) {
+          vectorOverlay.draw(); // Clear arrows
+        }
       }
+    });
+
+    const simBtnEl = document.getElementById('sim-btn');
+    simBtnEl?.addEventListener('click', () => {
+      simMode = !simMode;
+      simBtnEl.textContent = simMode ? 'Stop Test Motion' : 'Test Motion Overlay';
+      simBtnEl.style.background = simMode ? '#4f46e5' : '#374151';
     });
 
     // Wait for async pipeline compilation
@@ -149,7 +176,6 @@ async function init() {
 
     console.log('Pipeline ready:', {
       grayscale: grayscalePass.ready,
-      pyramid: pyramidBuilder.ready,
       opticalFlow: opticalFlowPass.ready,
       heatmap: heatmapPass.ready,
     });
@@ -191,6 +217,11 @@ function stop() {
   resValue.textContent = '—';
   hasFirstFrame = false;
   isReadingBack = false;
+  simMode = false;
+  if (simBtn) {
+    simBtn.textContent = 'Test Motion Overlay';
+    simBtn.style.background = '#374151';
+  }
 }
 
 // ── Frame Loop ─────────────────────────────────────────────────────
@@ -215,31 +246,70 @@ function onFrame() {
   // ── Layer 0: Draw video to the video canvas (2D) ──────────────
   videoCtx.drawImage(capture.video, 0, 0, videoCanvas.width, videoCanvas.height);
 
-  // ── GPU Pipeline: grayscale → pyramid → flow ──────────────────
+  // If simulation mode is active, draw an animated moving target onto canvas
+  if (simMode) {
+    const t = performance.now() * 0.0006;
+    const sx = (Math.sin(t * 1.5) * 0.35 + 0.5) * videoCanvas.width;
+    const sy = (Math.cos(t * 1.2) * 0.3 + 0.5) * videoCanvas.height;
+
+    videoCtx.save();
+    videoCtx.fillStyle = '#ffffff';
+    videoCtx.beginPath();
+    videoCtx.arc(sx, sy, 40, 0, Math.PI * 2);
+    videoCtx.fill();
+    videoCtx.fillStyle = '#000000';
+    videoCtx.fillRect(sx - 20, sy - 20, 20, 20);
+    videoCtx.fillRect(sx, sy, 20, 20);
+    videoCtx.restore();
+
+    // Also draw onto capture canvas so GPU sees it
+    const capX = (sx / videoCanvas.width) * capture.cameraWidth;
+    const capY = (sy / videoCanvas.height) * capture.cameraHeight;
+    capture.captureCtx.drawImage(capture.video, 0, 0, capture.cameraWidth, capture.cameraHeight);
+    capture.captureCtx.save();
+    capture.captureCtx.fillStyle = '#ffffff';
+    capture.captureCtx.beginPath();
+    capture.captureCtx.arc(capX, capY, (40 / videoCanvas.width) * capture.cameraWidth, 0, Math.PI * 2);
+    capture.captureCtx.fill();
+    capture.captureCtx.fillStyle = '#000000';
+    const sSize = (20 / videoCanvas.width) * capture.cameraWidth;
+    capture.captureCtx.fillRect(capX - sSize, capY - sSize, sSize, sSize);
+    capture.captureCtx.fillRect(capX, capY, sSize, sSize);
+    capture.captureCtx.restore();
+  }
+
+  // ── GPU Pipeline: grayscale → flow ────────────────────────────
   const gpuReady =
     grayscalePass?.ready &&
-    pyramidBuilder?.ready &&
     opticalFlowPass?.ready &&
     heatmapPass?.ready;
 
   if (gpuReady) {
-    // Import frame to GPU via getImageData + writeTexture (synchronous, reliable)
-    importFrame(device, capture);
+    // Import frame to GPU
+    if (!simMode) {
+      importFrame(device, capture);
+    } else {
+      // In sim mode, captureCtx already has the combined frame
+      const imgData = capture.captureCtx.getImageData(0, 0, capture.cameraWidth, capture.cameraHeight);
+      device.queue.writeTexture(
+        { texture: capture.frameTexture },
+        imgData.data,
+        { bytesPerRow: capture.cameraWidth * 4, rowsPerImage: capture.cameraHeight },
+        [capture.cameraWidth, capture.cameraHeight]
+      );
+    }
 
     const encoder = device.createCommandEncoder({ label: 'frame-encoder' });
 
-    // Grayscale + downsample
+    // 1. Grayscale + downsample
     grayscalePass.encode(encoder, capture.frameTexture);
 
-    // Build pyramid
-    pyramidBuilder.encode(encoder, grayscalePass.outputTexture);
-
-    // Optical flow (if we have a previous frame)
+    // 2. Optical flow (compare current crisp grayscale with previous frame grayscale)
     if (hasFirstFrame) {
       opticalFlowPass.encode(
         encoder,
-        pyramidBuilder.currentPyramid[0],
-        pyramidBuilder.previousPyramid[0]
+        grayscalePass.outputTexture,
+        prevGrayscaleTexture
       );
 
       // Copy flow for readback (for vector arrows)
@@ -248,7 +318,7 @@ function onFrame() {
       }
     }
 
-    // ── Layer 1: Heatmap on transparent WebGPU canvas ──────────
+    // 3. ── Layer 1: Heatmap on transparent WebGPU canvas ──────────
     const canvasView = context.getCurrentTexture().createView();
 
     const renderPass = encoder.beginRenderPass({
@@ -268,13 +338,18 @@ function onFrame() {
     }
 
     renderPass.end();
-    device.queue.submit([encoder.finish()]);
 
-    // Swap pyramids for next frame
-    pyramidBuilder.swapPyramids();
+    // 4. Save current grayscale into prevGrayscaleTexture for next frame
+    encoder.copyTextureToTexture(
+      { texture: grayscalePass.outputTexture },
+      { texture: prevGrayscaleTexture },
+      [WORKING_WIDTH, WORKING_HEIGHT]
+    );
+
+    device.queue.submit([encoder.finish()]);
     hasFirstFrame = true;
 
-    // ── Layer 2: Read back flow for vector arrows ──────────────
+    // 5. ── Layer 2: Read back flow for vector arrows ──────────────
     if (hasFirstFrame && !isReadingBack && vectorOverlay.enabled) {
       isReadingBack = true;
       opticalFlowPass
@@ -283,20 +358,6 @@ function onFrame() {
           vectorOverlay.setFlowData(flowData);
           vectorOverlay.draw();
           isReadingBack = false;
-
-          // Debug: log flow stats periodically
-          if (frameCount % 60 === 0) {
-            let maxMag = 0;
-            let nonZero = 0;
-            for (let i = 0; i < flowData.length; i += 2) {
-              const mag = Math.sqrt(flowData[i] ** 2 + flowData[i + 1] ** 2);
-              if (mag > 0.01) nonZero++;
-              if (mag > maxMag) maxMag = mag;
-            }
-            console.log(
-              `Flow: max=${maxMag.toFixed(2)}, nonZero=${nonZero}/${flowData.length / 2}`
-            );
-          }
         })
         .catch((err) => {
           console.error('Flow readback error:', err);

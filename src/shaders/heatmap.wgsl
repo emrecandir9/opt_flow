@@ -7,7 +7,6 @@ struct VertexOutput {
   @location(0) uv: vec2f,
 };
 
-// Full-screen triangle (3 vertices, no vertex buffer needed)
 @vertex
 fn vs_main(@builtin(vertex_index) vertexIndex: u32) -> VertexOutput {
   var pos = array<vec2f, 3>(
@@ -24,13 +23,12 @@ fn vs_main(@builtin(vertex_index) vertexIndex: u32) -> VertexOutput {
 }
 
 struct HeatmapParams {
-  maxSpeed:     f32,  // Maximum expected speed for normalization (e.g. 6.0)
-  opacity:      f32,  // Overall opacity multiplier (0.0 to 1.0)
+  maxSpeed:     f32,  // Maximum expected speed for normalization
+  opacity:      f32,  // Overall opacity multiplier
 };
 
 @group(0) @binding(0) var flowTexture: texture_2d<f32>;
-@group(0) @binding(1) var flowSampler: sampler;
-@group(0) @binding(2) var<uniform> params: HeatmapParams;
+@group(0) @binding(1) var<uniform> params: HeatmapParams;
 
 // HSV to RGB conversion
 fn hsv2rgb(h: f32, s: f32, v: f32) -> vec3f {
@@ -59,28 +57,27 @@ fn hsv2rgb(h: f32, s: f32, v: f32) -> vec3f {
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4f {
-  let flow = textureSample(flowTexture, flowSampler, in.uv).rg;
+  let dims = textureDimensions(flowTexture);
+  let clampedUV = clamp(in.uv, vec2f(0.0), vec2f(1.0));
+  let coord = vec2u(clamp(vec2f(dims) * clampedUV, vec2f(0.0), vec2f(dims) - 1.0));
+  let flow = textureLoad(flowTexture, coord, 0).rg;
+
   let vx = flow.x;
   let vy = flow.y;
 
   let magnitude = length(vec2f(vx, vy));
-  if (magnitude < 0.25) {
+  if (magnitude < 0.2) {
     return vec4f(0.0, 0.0, 0.0, 0.0);
   }
 
   let angle = atan2(vy, vx); // -π to π
-
-  // Map angle to hue (0-360)
   let hue = (angle / 3.14159265 + 1.0) * 180.0;
-
-  // Normalize magnitude
   let normMag = clamp(magnitude / params.maxSpeed, 0.0, 1.0);
 
-  // HSV: hue from direction, vibrant saturation & value
-  let rgb = hsv2rgb(hue, 0.85 + 0.15 * normMag, 0.9 + 0.1 * normMag);
+  // Vibrant saturated HSV color
+  let rgb = hsv2rgb(hue, 0.95, 1.0);
+  let alpha = clamp((0.45 + 0.55 * normMag) * params.opacity, 0.0, 0.95);
 
-  // Clearly visible alpha when motion exists
-  let alpha = clamp((0.35 + 0.65 * normMag) * params.opacity, 0.0, 1.0);
-
-  return vec4f(rgb, alpha);
+  // Output premultiplied RGBA for premultiplied canvas compositing
+  return vec4f(rgb * alpha, alpha);
 }

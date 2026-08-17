@@ -1,0 +1,10 @@
+.DS_Store
+node_modules/
+*.log
+.vscode/
+.idea/
+dist/
+*.swp
+*.swo
+*~
+Thumbs.db

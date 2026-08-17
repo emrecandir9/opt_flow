@@ -336,8 +336,14 @@
   <!-- Controls Row -->
   <div class="controls" id="controls" style="display: none;">
     <div class="control-group">
+      <label for="threshold-slider">Motion Threshold</label>
+      <input type="range" id="threshold-slider" min="2" max="40" value="10" step="1">
+      <span id="threshold-val" style="color: #38bdf8; font-weight: 600; font-size: 0.78rem; min-width: 45px;">1.0 px</span>
+    </div>
+    <div class="control-group">
       <label for="intensity-slider">Intensity</label>
       <input type="range" id="intensity-slider" min="10" max="100" value="80">
+      <span id="intensity-val" style="color: #38bdf8; font-weight: 600; font-size: 0.78rem; min-width: 35px;">80%</span>
     </div>
     <div class="control-group">
       <button class="sim-toggle" id="sim-btn">Test Motion Target</button>

@@ -52,6 +52,7 @@ let capture;
 let grayscalePass, prevGrayscaleTexture, opticalFlowPass, heatmapPass, vectorOverlay, particleSystem;
 let currentMode = 'particles'; // 'particles' | 'streamlines' | 'thermal' | 'arrows'
 let currentIntensity = 0.8;
+let currentThreshold = 1.0; // Minimum flow magnitude in pixels to visualize
 let frameCount = 0;
 let hasFirstFrame = false;
 let isReadingBack = false;
@@ -103,6 +104,10 @@ function setMode(mode) {
 
   if (!heatmapPass || !vectorOverlay || !particleSystem) return;
 
+  // Apply sensitivity threshold to all modules
+  particleSystem.minSpeedThreshold = currentThreshold;
+  vectorOverlay.minMagnitude = currentThreshold;
+
   // Configure sub-systems
   if (mode === 'particles') {
     particleSystem.enabled = true;
@@ -117,7 +122,7 @@ function setMode(mode) {
     compassLabel.textContent = 'Wind Flow';
   } else if (mode === 'thermal') {
     heatmapPass.enabled = true;
-    heatmapPass.setParams(6.0, currentIntensity, 0.0); // Thermal Speed Glow
+    heatmapPass.setParams(6.0, currentIntensity, 0.0, currentThreshold); // Thermal Speed Glow
     vectorOverlay.enabled = false;
     particleSystem.enabled = false;
     compassLabel.textContent = 'Speed Heatmap';
@@ -125,7 +130,7 @@ function setMode(mode) {
     vectorOverlay.enabled = true;
     vectorOverlay.mode = 'arrows';
     heatmapPass.enabled = true;
-    heatmapPass.setParams(6.0, currentIntensity * 0.4, 1.0); // Subtle HSV
+    heatmapPass.setParams(6.0, currentIntensity * 0.4, 1.0, currentThreshold); // Subtle HSV
     particleSystem.enabled = false;
     compassLabel.textContent = 'Quiver Vectors';
   }
@@ -211,13 +216,33 @@ async function init() {
       });
     });
 
-    // Bind Controls
-    intensitySlider?.addEventListener('input', (e) => {
+    // Bind Threshold (Sensitivity) Slider
+    const thresholdSlider = document.getElementById('threshold-slider');
+    const thresholdVal = document.getElementById('threshold-val');
+    thresholdSlider?.addEventListener('input', (e) => {
+      currentThreshold = parseInt(e.target.value) / 10;
+      if (thresholdVal) thresholdVal.textContent = `${currentThreshold.toFixed(1)} px`;
+
+      if (particleSystem) particleSystem.minSpeedThreshold = currentThreshold;
+      if (vectorOverlay) vectorOverlay.minMagnitude = currentThreshold;
+      if (heatmapPass) {
+        const colorMode = currentMode === 'arrows' ? 1.0 : 0.0;
+        const op = currentMode === 'arrows' ? currentIntensity * 0.4 : currentIntensity;
+        heatmapPass.setParams(6.0, op, colorMode, currentThreshold);
+      }
+    });
+
+    // Bind Intensity Slider
+    const intensitySliderEl = document.getElementById('intensity-slider');
+    const intensityVal = document.getElementById('intensity-val');
+    intensitySliderEl?.addEventListener('input', (e) => {
       currentIntensity = parseInt(e.target.value) / 100;
+      if (intensityVal) intensityVal.textContent = `${Math.round(currentIntensity * 100)}%`;
+
       if (currentMode === 'thermal') {
-        heatmapPass?.setParams(6.0, currentIntensity, 0.0);
+        heatmapPass?.setParams(6.0, currentIntensity, 0.0, currentThreshold);
       } else if (currentMode === 'arrows') {
-        heatmapPass?.setParams(6.0, currentIntensity * 0.4, 1.0);
+        heatmapPass?.setParams(6.0, currentIntensity * 0.4, 1.0, currentThreshold);
       }
     });
 

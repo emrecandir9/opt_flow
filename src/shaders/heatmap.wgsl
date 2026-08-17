@@ -1,6 +1,6 @@
 // Heatmap visualization — vertex + fragment shader
 // Renders full-screen quad with bilinear-filtered optical flow.
-// Supports Thermal Speed Glow and HSV Direction Wheel color modes.
+// Supports Thermal Speed Glow and HSV Direction Wheel color modes with adjustable threshold.
 
 struct VertexOutput {
   @builtin(position) position: vec4f,
@@ -26,7 +26,7 @@ struct HeatmapParams {
   maxSpeed:     f32,  // Maximum expected speed for normalization
   opacity:      f32,  // Overall opacity multiplier
   colorMode:    f32,  // 0.0 = Thermal Speed Glow, 1.0 = HSV Direction Wheel
-  _pad:         f32,
+  minSpeed:     f32,  // Minimum speed threshold to show motion
 };
 
 @group(0) @binding(0) var flowTexture: texture_2d<f32>;
@@ -91,11 +91,13 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
   let vy = flow.y;
   let magnitude = length(vec2f(vx, vy));
 
-  if (magnitude < 0.25) {
+  // Sensitivity threshold check: ignore subtle noise below minSpeed
+  if (magnitude < params.minSpeed) {
     return vec4f(0.0, 0.0, 0.0, 0.0);
   }
 
-  let normMag = clamp(magnitude / params.maxSpeed, 0.0, 1.0);
+  let span = max(params.maxSpeed - params.minSpeed, 0.1);
+  let normMag = clamp((magnitude - params.minSpeed) / span, 0.0, 1.0);
   var rgb: vec3f;
 
   if (params.colorMode < 0.5) {

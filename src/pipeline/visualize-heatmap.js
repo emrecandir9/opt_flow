@@ -68,12 +68,13 @@ export class HeatmapPass {
    * @param {number} maxSpeed
    * @param {number} opacity
    * @param {number} colorMode - 0.0 for Thermal Speed Glow, 1.0 for HSV Wheel
+   * @param {number} minSpeed - Minimum threshold to display motion
    */
-  setParams(maxSpeed, opacity, colorMode = 0.0) {
+  setParams(maxSpeed, opacity, colorMode = 0.0, minSpeed = 0.8) {
     this.device.queue.writeBuffer(
       this.uniformBuffer,
       0,
-      new Float32Array([maxSpeed, opacity, colorMode, 0.0])
+      new Float32Array([maxSpeed, opacity, colorMode, minSpeed])
     );
   }
 

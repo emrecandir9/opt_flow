@@ -20,6 +20,7 @@ export class ParticleSystem {
     this.flowHeight = flowHeight;
     this.count = particleCount;
     this.enabled = true;
+    this.minSpeedThreshold = 1.0;
 
     // Particle state arrays (SoA layout for cache efficiency)
     this.x = new Float32Array(particleCount);
@@ -101,9 +102,8 @@ export class ParticleSystem {
 
         const speed = Math.sqrt(flowVx * flowVx + flowVy * flowVy);
 
-        if (speed > 0.3) {
+        if (speed >= this.minSpeedThreshold) {
           // Force field impulse: push particle in motion direction
-          const impulse = Math.min(speed * 1.6, 12.0);
           this.vx[i] += flowVx * 0.45;
           this.vy[i] += flowVy * 0.45;
 

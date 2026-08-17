@@ -18,6 +18,7 @@ export class VectorOverlay {
     this.gridSpacing = gridSpacing;
     this.mode = 'streamlines'; // 'streamlines' | 'arrows' | 'off'
     this.enabled = true;
+    this.minMagnitude = 1.0;
     this.lastFlowData = null;
 
     // Streamline particles for animated wind-tunnel visualization
@@ -86,7 +87,7 @@ export class VectorOverlay {
 
       const speed = Math.sqrt(vx * vx + vy * vy);
 
-      if (speed > 0.4) {
+      if (speed >= this.minMagnitude) {
         s.x += vx;
         s.y += vy;
         s.history.push({ x: s.x, y: s.y, speed });
@@ -135,7 +136,7 @@ export class VectorOverlay {
     const scaleX = cw / this.flowWidth;
     const scaleY = ch / this.flowHeight;
     const arrowScale = Math.max(scaleX, scaleY) * 2.2;
-    const minMagnitude = 0.5;
+    const minMagnitude = this.minMagnitude;
 
     ctx.lineWidth = 2.0;
     ctx.lineCap = 'round';

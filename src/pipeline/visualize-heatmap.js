@@ -17,7 +17,7 @@ export class HeatmapPass {
       size: 8,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
-    this.setParams(10.0, 0.6);
+    this.setParams(6.0, 0.7);
 
     // Sampler for flow texture
     this.sampler = device.createSampler({

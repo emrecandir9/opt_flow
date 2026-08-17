@@ -24,8 +24,8 @@ fn vs_main(@builtin(vertex_index) vertexIndex: u32) -> VertexOutput {
 }
 
 struct HeatmapParams {
-  maxSpeed:     f32,  // Maximum expected speed for normalization
-  opacity:      f32,  // Overall opacity multiplier
+  maxSpeed:     f32,  // Maximum expected speed for normalization (e.g. 6.0)
+  opacity:      f32,  // Overall opacity multiplier (0.0 to 1.0)
 };
 
 @group(0) @binding(0) var flowTexture: texture_2d<f32>;
@@ -64,6 +64,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
   let vy = flow.y;
 
   let magnitude = length(vec2f(vx, vy));
+  if (magnitude < 0.25) {
+    return vec4f(0.0, 0.0, 0.0, 0.0);
+  }
+
   let angle = atan2(vy, vx); // -π to π
 
   // Map angle to hue (0-360)
@@ -72,11 +76,11 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
   // Normalize magnitude
   let normMag = clamp(magnitude / params.maxSpeed, 0.0, 1.0);
 
-  // HSV: hue from direction, saturation & value from magnitude
-  let rgb = hsv2rgb(hue, normMag * 0.8 + 0.2, normMag * 0.9 + 0.1);
+  // HSV: hue from direction, vibrant saturation & value
+  let rgb = hsv2rgb(hue, 0.85 + 0.15 * normMag, 0.9 + 0.1 * normMag);
 
-  // Alpha based on magnitude — static areas stay transparent
-  let alpha = clamp(normMag * 1.5, 0.0, 0.85) * params.opacity;
+  // Clearly visible alpha when motion exists
+  let alpha = clamp((0.35 + 0.65 * normMag) * params.opacity, 0.0, 1.0);
 
   return vec4f(rgb, alpha);
 }

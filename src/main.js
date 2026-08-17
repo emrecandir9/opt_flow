@@ -134,7 +134,7 @@ async function init() {
     // Bind UI controls
     heatmapOpacityInput.addEventListener('input', () => {
       const opacity = parseInt(heatmapOpacityInput.value) / 100;
-      heatmapPass.setParams(10.0, opacity);
+      heatmapPass.setParams(6.0, opacity);
     });
 
     arrowsToggle.addEventListener('change', () => {
@@ -144,8 +144,15 @@ async function init() {
       }
     });
 
-    // Wait a bit for async pipeline compilation
-    await new Promise((r) => setTimeout(r, 300));
+    // Wait for async pipeline compilation
+    await new Promise((r) => setTimeout(r, 500));
+
+    console.log('Pipeline ready:', {
+      grayscale: grayscalePass.ready,
+      pyramid: pyramidBuilder.ready,
+      opticalFlow: opticalFlowPass.ready,
+      heatmap: heatmapPass.ready,
+    });
 
     // Start frame loop
     isRunning = true;
@@ -190,7 +197,6 @@ function stop() {
 function requestFrame() {
   if (!isRunning) return;
 
-  // Prefer requestVideoFrameCallback for accurate per-frame timing
   if ('requestVideoFrameCallback' in HTMLVideoElement.prototype) {
     video.requestVideoFrameCallback(onFrame);
   } else {
@@ -201,7 +207,7 @@ function requestFrame() {
 function onFrame() {
   if (!isRunning || !capture) return;
 
-  // Schedule next frame immediately
+  // Schedule next frame
   requestFrame();
 
   const frameStart = performance.now();
@@ -210,7 +216,6 @@ function onFrame() {
   videoCtx.drawImage(capture.video, 0, 0, videoCanvas.width, videoCanvas.height);
 
   // ── GPU Pipeline: grayscale → pyramid → flow ──────────────────
-  // Only run GPU pipeline if all stages are ready
   const gpuReady =
     grayscalePass?.ready &&
     pyramidBuilder?.ready &&
@@ -218,7 +223,7 @@ function onFrame() {
     heatmapPass?.ready;
 
   if (gpuReady) {
-    // Import frame to GPU (for compute pipeline)
+    // Import frame to GPU via getImageData + writeTexture (synchronous, reliable)
     importFrame(device, capture);
 
     const encoder = device.createCommandEncoder({ label: 'frame-encoder' });
@@ -251,21 +256,18 @@ function onFrame() {
       colorAttachments: [
         {
           view: canvasView,
-          clearValue: { r: 0, g: 0, b: 0, a: 0 }, // Transparent clear
+          clearValue: { r: 0, g: 0, b: 0, a: 0 },
           loadOp: 'clear',
           storeOp: 'store',
         },
       ],
     });
 
-    // Draw heatmap overlay (alpha blended, transparent background)
     if (hasFirstFrame) {
       heatmapPass.encodeInPass(renderPass, opticalFlowPass.flowTexture);
     }
 
     renderPass.end();
-
-    // Submit
     device.queue.submit([encoder.finish()]);
 
     // Swap pyramids for next frame
@@ -281,8 +283,23 @@ function onFrame() {
           vectorOverlay.setFlowData(flowData);
           vectorOverlay.draw();
           isReadingBack = false;
+
+          // Debug: log flow stats periodically
+          if (frameCount % 60 === 0) {
+            let maxMag = 0;
+            let nonZero = 0;
+            for (let i = 0; i < flowData.length; i += 2) {
+              const mag = Math.sqrt(flowData[i] ** 2 + flowData[i + 1] ** 2);
+              if (mag > 0.01) nonZero++;
+              if (mag > maxMag) maxMag = mag;
+            }
+            console.log(
+              `Flow: max=${maxMag.toFixed(2)}, nonZero=${nonZero}/${flowData.length / 2}`
+            );
+          }
         })
-        .catch(() => {
+        .catch((err) => {
+          console.error('Flow readback error:', err);
           isReadingBack = false;
         });
     }

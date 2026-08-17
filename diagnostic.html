@@ -1,0 +1,297 @@
+<!DOCTYPE html>
+<html>
+<head><title>GPU Pipeline Diagnostic</title></head>
+<body style="background:#111;color:#eee;font-family:monospace;padding:20px;">
+<h2>GPU Pipeline Diagnostic</h2>
+<button id="run">Run Test</button>
+<pre id="output" style="white-space:pre-wrap;"></pre>
+<canvas id="debug-canvas" style="border:1px solid #444;margin-top:10px;"></canvas>
+<video id="vid" autoplay muted playsinline style="position:fixed;top:-999px;"></video>
+<script type="module">
+const out = document.getElementById('output');
+const log = (msg) => { out.textContent += msg + '\n'; console.log(msg); };
+
+document.getElementById('run').onclick = async () => {
+  try {
+    // 1. Init WebGPU
+    const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
+    const device = await adapter.requestDevice();
+    log('✓ WebGPU device created');
+
+    // 2. Start camera
+    const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 } });
+    const vid = document.getElementById('vid');
+    vid.srcObject = stream;
+    await new Promise(r => vid.onloadedmetadata = () => { vid.play(); r(); });
+    await new Promise(r => setTimeout(r, 500)); // Wait for frames
+    log(`✓ Camera: ${vid.videoWidth}×${vid.videoHeight}`);
+
+    // 3. Draw video to canvas, get pixel data
+    const canvas = document.createElement('canvas');
+    canvas.width = vid.videoWidth;
+    canvas.height = vid.videoHeight;
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    ctx.drawImage(vid, 0, 0);
+    const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+
+    // Check canvas data
+    let nonZeroCanvas = 0;
+    for (let i = 0; i < imgData.data.length; i += 4) {
+      if (imgData.data[i] > 0 || imgData.data[i+1] > 0 || imgData.data[i+2] > 0) nonZeroCanvas++;
+    }
+    log(`Canvas pixel check: ${nonZeroCanvas}/${canvas.width * canvas.height} non-black pixels`);
+    log(`First pixel RGBA: [${imgData.data[0]}, ${imgData.data[1]}, ${imgData.data[2]}, ${imgData.data[3]}]`);
+
+    // 4. Create GPU texture and write data
+    const tex = device.createTexture({
+      size: [canvas.width, canvas.height],
+      format: 'rgba8unorm',
+      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.COPY_SRC,
+    });
+
+    device.queue.writeTexture(
+      { texture: tex },
+      imgData.data,
+      { bytesPerRow: canvas.width * 4, rowsPerImage: canvas.height },
+      [canvas.width, canvas.height]
+    );
+    log('✓ writeTexture called');
+
+    // 5. Read back the GPU texture to verify data arrived
+    const rowBytes = canvas.width * 4;
+    const alignedRowBytes = Math.ceil(rowBytes / 256) * 256;
+    const readBuf = device.createBuffer({
+      size: alignedRowBytes * canvas.height,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+    });
+
+    const enc = device.createCommandEncoder();
+    enc.copyTextureToBuffer(
+      { texture: tex },
+      { buffer: readBuf, bytesPerRow: alignedRowBytes },
+      [canvas.width, canvas.height]
+    );
+    device.queue.submit([enc.finish()]);
+
+    await readBuf.mapAsync(GPUMapMode.READ);
+    const gpuData = new Uint8Array(readBuf.getMappedRange());
+
+    let nonZeroGPU = 0;
+    // Read back row by row accounting for alignment padding
+    for (let y = 0; y < canvas.height; y++) {
+      for (let x = 0; x < canvas.width; x++) {
+        const i = y * alignedRowBytes + x * 4;
+        if (gpuData[i] > 0 || gpuData[i+1] > 0 || gpuData[i+2] > 0) nonZeroGPU++;
+      }
+    }
+    log(`GPU readback: ${nonZeroGPU}/${canvas.width * canvas.height} non-black pixels`);
+    log(`GPU first pixel RGBA: [${gpuData[0]}, ${gpuData[1]}, ${gpuData[2]}, ${gpuData[3]}]`);
+    readBuf.unmap();
+
+    // 6. Now test the grayscale shader
+    log('\n--- Testing Grayscale Shader ---');
+    const gsCode = await fetch('src/shaders/grayscale.wgsl').then(r => r.text());
+    const gsModule = device.createShaderModule({ code: gsCode });
+
+    const dstW = 480, dstH = 270;
+    const gsTex = device.createTexture({
+      size: [dstW, dstH],
+      format: 'r32float',
+      usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC,
+    });
+
+    const gsUniform = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    device.queue.writeBuffer(gsUniform, 0, new Uint32Array([canvas.width, canvas.height, dstW, dstH]));
+
+    const gsPipeline = device.createComputePipeline({
+      layout: 'auto',
+      compute: { module: gsModule, entryPoint: 'main' },
+    });
+
+    const gsBG = device.createBindGroup({
+      layout: gsPipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: tex.createView() },
+        { binding: 1, resource: gsTex.createView() },
+        { binding: 2, resource: { buffer: gsUniform } },
+      ],
+    });
+
+    const enc2 = device.createCommandEncoder();
+    const pass = enc2.beginComputePass();
+    pass.setPipeline(gsPipeline);
+    pass.setBindGroup(0, gsBG);
+    pass.dispatchWorkgroups(Math.ceil(dstW / 8), Math.ceil(dstH / 8));
+    pass.end();
+
+    // Read back grayscale
+    const gsRowBytes = dstW * 4; // r32float = 4 bytes
+    const gsAlignedRow = Math.ceil(gsRowBytes / 256) * 256;
+    const gsReadBuf = device.createBuffer({
+      size: gsAlignedRow * dstH,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+    });
+
+    enc2.copyTextureToBuffer(
+      { texture: gsTex },
+      { buffer: gsReadBuf, bytesPerRow: gsAlignedRow },
+      [dstW, dstH]
+    );
+    device.queue.submit([enc2.finish()]);
+
+    await gsReadBuf.mapAsync(GPUMapMode.READ);
+    const gsData = new Float32Array(gsReadBuf.getMappedRange());
+
+    // Account for aligned rows
+    let nonZeroGS = 0;
+    const gsPixelsPerRow = gsAlignedRow / 4; // floats per aligned row
+    for (let y = 0; y < dstH; y++) {
+      for (let x = 0; x < dstW; x++) {
+        const val = gsData[y * gsPixelsPerRow + x];
+        if (val > 0.001) nonZeroGS++;
+      }
+    }
+    const firstGS = gsData[0];
+    log(`Grayscale output: ${nonZeroGS}/${dstW * dstH} non-zero pixels`);
+    log(`Grayscale first pixel: ${firstGS.toFixed(4)}`);
+    log(`Grayscale sample values: [${Array.from(gsData.slice(0, 10)).map(v => v.toFixed(3)).join(', ')}]`);
+    gsReadBuf.unmap();
+
+    if (nonZeroGS > 0) {
+      log('\n✓ PIPELINE IS WORKING! Grayscale produces valid output.');
+      
+      // 7. Test Optical Flow on two synthetic test textures with known motion (+3 px right)
+      log('\n--- Testing Block-Matching Optical Flow Shader ---');
+      const bmCode = await fetch('src/shaders/block-match.wgsl').then(r => r.text());
+      const bmModule = device.createShaderModule({ code: bmCode });
+
+      // Create prevTex with a white square at (100, 100) size 40x40
+      // Create currTex with the white square at (104, 100) size 40x40 (shifted by +4 in X)
+      const prevArray = new Float32Array(dstW * dstH);
+      const currArray = new Float32Array(dstW * dstH);
+      for (let y = 0; y < dstH; y++) {
+        for (let x = 0; x < dstW; x++) {
+          if (x >= 100 && x < 140 && y >= 100 && y < 140) {
+            prevArray[y * dstW + x] = 1.0;
+          }
+          if (x >= 104 && x < 144 && y >= 100 && y < 140) {
+            currArray[y * dstW + x] = 1.0;
+          }
+        }
+      }
+
+      const prevTex = device.createTexture({
+        size: [dstW, dstH],
+        format: 'r32float',
+        usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+      });
+      const currTex = device.createTexture({
+        size: [dstW, dstH],
+        format: 'r32float',
+        usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+      });
+
+      device.queue.writeTexture(
+        { texture: prevTex },
+        prevArray,
+        { bytesPerRow: dstW * 4, rowsPerImage: dstH },
+        [dstW, dstH]
+      );
+      device.queue.writeTexture(
+        { texture: currTex },
+        currArray,
+        { bytesPerRow: dstW * 4, rowsPerImage: dstH },
+        [dstW, dstH]
+      );
+
+      const flowOutTex = device.createTexture({
+        size: [dstW, dstH],
+        format: 'rg32float',
+        usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC,
+      });
+
+      const bmUniform = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+      device.queue.writeBuffer(bmUniform, 0, new Uint32Array([dstW, dstH, 8, 8]));
+
+      const bmPipeline = device.createComputePipeline({
+        layout: 'auto',
+        compute: { module: bmModule, entryPoint: 'main' },
+      });
+
+      const bmBG = device.createBindGroup({
+        layout: bmPipeline.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: currTex.createView() },
+          { binding: 1, resource: prevTex.createView() },
+          { binding: 2, resource: flowOutTex.createView() },
+          { binding: 3, resource: { buffer: bmUniform } },
+        ],
+      });
+
+      const enc3 = device.createCommandEncoder();
+      const bmPass = enc3.beginComputePass();
+      bmPass.setPipeline(bmPipeline);
+      bmPass.setBindGroup(0, bmBG);
+      bmPass.dispatchWorkgroups(Math.ceil(Math.ceil(dstW / 8) / 8), Math.ceil(Math.ceil(dstH / 8) / 8));
+      bmPass.end();
+
+      // Read back flow
+      const flowRowBytes = dstW * 8; // rg32float = 8 bytes
+      const flowAlignedRow = Math.ceil(flowRowBytes / 256) * 256;
+      const flowReadBuf = device.createBuffer({
+        size: flowAlignedRow * dstH,
+        usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+      });
+
+      enc3.copyTextureToBuffer(
+        { texture: flowOutTex },
+        { buffer: flowReadBuf, bytesPerRow: flowAlignedRow },
+        [dstW, dstH]
+      );
+      device.queue.submit([enc3.finish()]);
+
+      await flowReadBuf.mapAsync(GPUMapMode.READ);
+      const flowData = new Float32Array(flowReadBuf.getMappedRange());
+      const flowFloatsPerRow = flowAlignedRow / 4;
+
+      let nonZeroFlow = 0;
+      let maxFlowMag = 0;
+      let sampleVectors = [];
+
+      for (let y = 0; y < dstH; y++) {
+        for (let x = 0; x < dstW; x++) {
+          const idx = y * flowFloatsPerRow + x * 2;
+          const vx = flowData[idx];
+          const vy = flowData[idx + 1];
+          const mag = Math.sqrt(vx * vx + vy * vy);
+          if (mag > 0.01) {
+            nonZeroFlow++;
+            if (mag > maxFlowMag) maxFlowMag = mag;
+            if (sampleVectors.length < 5) {
+              sampleVectors.push(`(${x},${y}) -> [vx=${vx}, vy=${vy}]`);
+            }
+          }
+        }
+      }
+
+      log(`Synthetic Flow test: nonZero = ${nonZeroFlow}/${dstW * dstH}, maxMag = ${maxFlowMag.toFixed(2)}`);
+      log(`Sample vectors: ${sampleVectors.join('; ')}`);
+      flowReadBuf.unmap();
+    }
+
+    // Show debug canvas with the captured frame
+    const dbgCanvas = document.getElementById('debug-canvas');
+    dbgCanvas.width = 320;
+    dbgCanvas.height = 240;
+    const dbgCtx = dbgCanvas.getContext('2d');
+    dbgCtx.drawImage(vid, 0, 0, 320, 240);
+
+    stream.getTracks().forEach(t => t.stop());
+  } catch (e) {
+    log('ERROR: ' + e.message);
+    console.error(e);
+  }
+};
+</script>
+</body>
+</html>

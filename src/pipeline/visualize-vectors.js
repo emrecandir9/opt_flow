@@ -43,14 +43,17 @@ export class VectorOverlay {
     const data = this.lastFlowData;
     const scaleX = cw / this.flowWidth;
     const scaleY = ch / this.flowHeight;
-    const arrowScale = Math.max(scaleX, scaleY) * 1.5;
-    const minMagnitude = 0.5; // Minimum flow magnitude to draw an arrow
+    const arrowScale = Math.max(scaleX, scaleY) * 2.2;
+    const minMagnitude = 0.4; // Minimum flow magnitude to draw an arrow
 
-    ctx.lineWidth = 1.5;
+    ctx.lineWidth = 2.0;
     ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    ctx.shadowColor = 'rgba(0, 0, 0, 0.7)';
+    ctx.shadowBlur = 4;
 
-    for (let y = 0; y < this.flowHeight; y += this.gridSpacing) {
-      for (let x = 0; x < this.flowWidth; x += this.gridSpacing) {
+    for (let y = 4; y < this.flowHeight; y += this.gridSpacing) {
+      for (let x = 4; x < this.flowWidth; x += this.gridSpacing) {
         const idx = (y * this.flowWidth + x) * 2;
         const vx = data[idx];
         const vy = data[idx + 1];
@@ -59,8 +62,8 @@ export class VectorOverlay {
         if (magnitude < minMagnitude) continue;
 
         // Position on display canvas
-        const px = x * scaleX;
-        const py = y * scaleY;
+        const px = (x + 0.5) * scaleX;
+        const py = (y + 0.5) * scaleY;
 
         // Arrow endpoint
         const ex = px + vx * arrowScale;
@@ -69,10 +72,11 @@ export class VectorOverlay {
         // Color from flow direction (HSV wheel)
         const angle = Math.atan2(vy, vx);
         const hue = ((angle / Math.PI + 1) * 180) % 360;
-        const normMag = Math.min(magnitude / 10, 1);
+        const normMag = Math.min(magnitude / 8.0, 1.0);
 
-        ctx.strokeStyle = `hsla(${hue}, ${70 + normMag * 30}%, ${50 + normMag * 20}%, ${0.4 + normMag * 0.5})`;
-        ctx.fillStyle = ctx.strokeStyle;
+        const color = `hsl(${hue}, 95%, ${60 + normMag * 20}%)`;
+        ctx.strokeStyle = color;
+        ctx.fillStyle = color;
 
         // Draw arrow line
         ctx.beginPath();
@@ -81,18 +85,18 @@ export class VectorOverlay {
         ctx.stroke();
 
         // Draw arrowhead
-        const headLen = 4 * (1 + normMag);
+        const headLen = Math.max(6, 6 * (1 + normMag * 0.5));
         const headAngle = Math.atan2(ey - py, ex - px);
 
         ctx.beginPath();
         ctx.moveTo(ex, ey);
         ctx.lineTo(
-          ex - headLen * Math.cos(headAngle - 0.4),
-          ey - headLen * Math.sin(headAngle - 0.4)
+          ex - headLen * Math.cos(headAngle - 0.45),
+          ey - headLen * Math.sin(headAngle - 0.45)
         );
         ctx.lineTo(
-          ex - headLen * Math.cos(headAngle + 0.4),
-          ey - headLen * Math.sin(headAngle + 0.4)
+          ex - headLen * Math.cos(headAngle + 0.45),
+          ey - headLen * Math.sin(headAngle + 0.45)
         );
         ctx.closePath();
         ctx.fill();

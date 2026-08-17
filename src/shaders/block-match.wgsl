@@ -28,18 +28,57 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
   let blockX = gid.x * params.blockSize;
   let blockY = gid.y * params.blockSize;
 
-  var bestSAD = 1e10;
+  // 1. Check block texture variance (contrast)
+  var minLuma = 1.0;
+  var maxLuma = 0.0;
+  var sadZero = 0.0;
+  var validPixels = 0.0;
+
+  for (var by = 0u; by < params.blockSize; by++) {
+    for (var bx = 0u; bx < params.blockSize; bx++) {
+      let cx = blockX + bx;
+      let cy = blockY + by;
+      if (cx < params.width && cy < params.height) {
+        let currVal = textureLoad(currFrame, vec2u(cx, cy), 0).r;
+        let prevVal = textureLoad(prevFrame, vec2u(cx, cy), 0).r;
+        minLuma = min(minLuma, currVal);
+        maxLuma = max(maxLuma, currVal);
+        sadZero += abs(currVal - prevVal);
+        validPixels += 1.0;
+      }
+    }
+  }
+
+  // If the block is flat (low contrast) or temporal diff is tiny noise, no motion
+  let contrast = maxLuma - minLuma;
+  if (contrast < 0.015 || (sadZero / max(validPixels, 1.0)) < 0.008) {
+    for (var by = 0u; by < params.blockSize; by++) {
+      for (var bx = 0u; bx < params.blockSize; bx++) {
+        let wx = blockX + bx;
+        let wy = blockY + by;
+        if (wx < params.width && wy < params.height) {
+          textureStore(flowOut, vec2u(wx, wy), vec4f(0.0, 0.0, 0.0, 0.0));
+        }
+      }
+    }
+    return;
+  }
+
+  // 2. Search for best displacement
+  var bestSAD = sadZero;
   var bestDx = 0;
   var bestDy = 0;
 
   let sr = i32(params.searchRadius);
 
-  // Exhaustive search over the search window
   for (var dy = -sr; dy <= sr; dy++) {
     for (var dx = -sr; dx <= sr; dx++) {
+      if (dx == 0 && dy == 0) {
+        continue;
+      }
+
       var sad = 0.0;
 
-      // Compute SAD for this candidate displacement
       for (var by = 0u; by < params.blockSize; by++) {
         for (var bx = 0u; bx < params.blockSize; bx++) {
           let cx = blockX + bx;
@@ -52,7 +91,6 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
           let px = i32(cx) + dx;
           let py = i32(cy) + dy;
 
-          // Clamp to image bounds
           let cpx = u32(clamp(px, 0, i32(params.width) - 1));
           let cpy = u32(clamp(py, 0, i32(params.height) - 1));
 
@@ -63,8 +101,13 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
         }
       }
 
-      if (sad < bestSAD) {
-        bestSAD = sad;
+      // Small penalty for larger displacements to prefer smaller motion
+      let distCost = f32(dx * dx + dy * dy) * 0.003;
+      let totalCost = sad + distCost;
+
+      // Only update if significantly better than current best
+      if (totalCost < bestSAD * 0.96) {
+        bestSAD = totalCost;
         bestDx = dx;
         bestDy = dy;
       }

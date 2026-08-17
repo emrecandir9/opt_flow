@@ -1,7 +1,7 @@
 /**
  * Camera capture module.
  * Handles getUserMedia, video element setup, and frame import to GPU texture.
- * Uses an offscreen canvas intermediate for reliable frame capture.
+ * Uses canvas getImageData + device.queue.writeTexture for maximum reliability.
  */
 
 import { createRGBATexture } from './utils/texture-utils.js';
@@ -9,8 +9,8 @@ import { createRGBATexture } from './utils/texture-utils.js';
 /**
  * @typedef {Object} CaptureState
  * @property {HTMLVideoElement} video
- * @property {HTMLCanvasElement} offscreenCanvas - Intermediate canvas for frame capture
- * @property {CanvasRenderingContext2D} offscreenCtx
+ * @property {HTMLCanvasElement} captureCanvas - Canvas for video frame extraction
+ * @property {CanvasRenderingContext2D} captureCtx
  * @property {GPUTexture} frameTexture - Current camera frame as GPU texture
  * @property {number} cameraWidth - Actual camera resolution width
  * @property {number} cameraHeight - Actual camera resolution height
@@ -59,20 +59,19 @@ export async function startCapture(video, device) {
   const cameraWidth = video.videoWidth;
   const cameraHeight = video.videoHeight;
 
-  // Create an offscreen canvas for reliable video frame capture
-  // Direct HTMLVideoElement → copyExternalImageToTexture can be unreliable
-  const offscreenCanvas = document.createElement('canvas');
-  offscreenCanvas.width = cameraWidth;
-  offscreenCanvas.height = cameraHeight;
-  const offscreenCtx = offscreenCanvas.getContext('2d', { willReadFrequently: false });
+  // Create a capture canvas at camera resolution for pixel data extraction
+  const captureCanvas = document.createElement('canvas');
+  captureCanvas.width = cameraWidth;
+  captureCanvas.height = cameraHeight;
+  const captureCtx = captureCanvas.getContext('2d', { willReadFrequently: true });
 
   // Create the GPU texture to receive video frames
   const frameTexture = createRGBATexture(device, cameraWidth, cameraHeight, 'camera-frame');
 
   return {
     video,
-    offscreenCanvas,
-    offscreenCtx,
+    captureCanvas,
+    captureCtx,
     frameTexture,
     cameraWidth,
     cameraHeight,
@@ -82,19 +81,29 @@ export async function startCapture(video, device) {
 
 /**
  * Copy the current video frame into the GPU texture.
- * Draws video to offscreen canvas first, then copies to GPU.
+ * Uses canvas drawImage + getImageData + writeTexture for maximum reliability.
+ * This bypasses copyExternalImageToTexture entirely.
  * @param {GPUDevice} device
  * @param {CaptureState} capture
  */
 export function importFrame(device, capture) {
-  // Draw video frame to the offscreen canvas
-  capture.offscreenCtx.drawImage(capture.video, 0, 0, capture.cameraWidth, capture.cameraHeight);
+  const { captureCtx, captureCanvas, video, frameTexture, cameraWidth, cameraHeight } = capture;
 
-  // Copy canvas to GPU texture
-  device.queue.copyExternalImageToTexture(
-    { source: capture.offscreenCanvas, flipY: false },
-    { texture: capture.frameTexture },
-    [capture.cameraWidth, capture.cameraHeight]
+  // Draw video to capture canvas
+  captureCtx.drawImage(video, 0, 0, cameraWidth, cameraHeight);
+
+  // Extract raw pixel data
+  const imageData = captureCtx.getImageData(0, 0, cameraWidth, cameraHeight);
+
+  // Write pixel data directly to GPU texture
+  device.queue.writeTexture(
+    { texture: frameTexture },
+    imageData.data,
+    {
+      bytesPerRow: cameraWidth * 4,
+      rowsPerImage: cameraHeight,
+    },
+    [cameraWidth, cameraHeight]
   );
 }
 

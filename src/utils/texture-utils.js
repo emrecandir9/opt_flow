@@ -13,7 +13,8 @@ export function createGrayscaleTexture(device, width, height, label = 'grayscale
     usage:
       GPUTextureUsage.TEXTURE_BINDING |
       GPUTextureUsage.STORAGE_BINDING |
-      GPUTextureUsage.COPY_SRC,
+      GPUTextureUsage.COPY_SRC |
+      GPUTextureUsage.COPY_DST,
   });
 }
 
@@ -43,7 +44,8 @@ export function createFlowTexture(device, width, height, label = 'flow') {
     usage:
       GPUTextureUsage.TEXTURE_BINDING |
       GPUTextureUsage.STORAGE_BINDING |
-      GPUTextureUsage.COPY_SRC,
+      GPUTextureUsage.COPY_SRC |
+      GPUTextureUsage.COPY_DST,
   });
 }
 
@@ -55,7 +57,8 @@ export function createPingPongTextures(device, width, height, format, label = 'p
   const usage =
     GPUTextureUsage.TEXTURE_BINDING |
     GPUTextureUsage.STORAGE_BINDING |
-    GPUTextureUsage.COPY_SRC;
+    GPUTextureUsage.COPY_SRC |
+    GPUTextureUsage.COPY_DST;
 
   return [
     device.createTexture({ label: `${label}_A`, size: [width, height], format, usage }),

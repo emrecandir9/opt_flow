@@ -117,6 +117,10 @@
       z-index: 1;
     }
 
+    #video-canvas {
+      z-index: 0;
+    }
+
     .hud {
       display: flex;
       gap: 1.5rem;
@@ -223,6 +227,7 @@
   </div>
 
   <div class="canvas-container">
+    <canvas id="video-canvas"></canvas>
     <canvas id="gpu-canvas"></canvas>
     <canvas id="arrow-canvas"></canvas>
   </div>

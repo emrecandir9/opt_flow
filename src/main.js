@@ -1,5 +1,10 @@
 /**
  * Main entry point — sets up WebGPU, camera, pipeline stages, and animation loop.
+ *
+ * Rendering architecture (3 layers):
+ *   Layer 0 (bottom): video-canvas  — 2D context drawing camera feed
+ *   Layer 1 (middle): gpu-canvas    — WebGPU transparent canvas for heatmap overlay
+ *   Layer 2 (top):    arrow-canvas  — 2D context drawing vector arrows
  */
 
 import { initWebGPU } from './webgpu-context.js';
@@ -19,6 +24,7 @@ const SEARCH_RADIUS = 8;
 const ARROW_GRID_SPACING = 12;
 
 // ── DOM Elements ───────────────────────────────────────────────────
+const videoCanvas = document.getElementById('video-canvas');
 const gpuCanvas = document.getElementById('gpu-canvas');
 const arrowCanvas = document.getElementById('arrow-canvas');
 const video = document.getElementById('camera-video');
@@ -33,11 +39,13 @@ const heatmapOpacityInput = document.getElementById('heatmap-opacity');
 const arrowsToggle = document.getElementById('arrows-toggle');
 const resolutionSelect = document.getElementById('resolution-select');
 
+// ── 2D contexts ────────────────────────────────────────────────────
+const videoCtx = videoCanvas.getContext('2d');
+
 // ── State ──────────────────────────────────────────────────────────
 let device, context, canvasFormat;
 let capture;
 let grayscalePass, pyramidBuilder, opticalFlowPass, heatmapPass, vectorOverlay;
-let compositePipeline, compositeSampler;
 let frameCount = 0;
 let hasFirstFrame = false;
 let isReadingBack = false;
@@ -52,41 +60,14 @@ function showError(msg) {
   startBtn.disabled = true;
 }
 
-// ── Composite Pipeline Init ────────────────────────────────────────
-async function initCompositePipeline() {
-  const shaderCode = await fetch('src/shaders/composite.wgsl').then((r) => r.text());
-  const shaderModule = device.createShaderModule({
-    label: 'composite-shader',
-    code: shaderCode,
-  });
-
-  compositeSampler = device.createSampler({
-    magFilter: 'linear',
-    minFilter: 'linear',
-  });
-
-  compositePipeline = device.createRenderPipeline({
-    label: 'composite-pipeline',
-    layout: 'auto',
-    vertex: {
-      module: shaderModule,
-      entryPoint: 'vs_main',
-    },
-    fragment: {
-      module: shaderModule,
-      entryPoint: 'fs_main',
-      targets: [{ format: canvasFormat }],
-    },
-    primitive: { topology: 'triangle-list' },
-  });
-}
-
 // ── Canvas Sizing ──────────────────────────────────────────────────
 function resizeCanvases() {
   const container = gpuCanvas.parentElement;
   const w = container.clientWidth;
   const h = container.clientHeight;
 
+  videoCanvas.width = w;
+  videoCanvas.height = h;
   gpuCanvas.width = w;
   gpuCanvas.height = h;
   arrowCanvas.width = w;
@@ -144,8 +125,6 @@ async function init() {
     );
     vectorOverlay.resize(arrowCanvas.width, arrowCanvas.height);
 
-    await initCompositePipeline();
-
     // Update UI
     resValue.textContent = `${WORKING_WIDTH}×${WORKING_HEIGHT}`;
     controls.style.display = 'flex';
@@ -166,7 +145,7 @@ async function init() {
     });
 
     // Wait a bit for async pipeline compilation
-    await new Promise((r) => setTimeout(r, 200));
+    await new Promise((r) => setTimeout(r, 300));
 
     // Start frame loop
     isRunning = true;
@@ -189,6 +168,7 @@ function stop() {
   }
 
   // Clear canvases
+  videoCtx.clearRect(0, 0, videoCanvas.width, videoCanvas.height);
   if (vectorOverlay) {
     vectorOverlay.destroy();
   }
@@ -218,111 +198,97 @@ function requestFrame() {
   }
 }
 
-async function onFrame() {
-  if (!isRunning) return;
+function onFrame() {
+  if (!isRunning || !capture) return;
 
   // Schedule next frame immediately
   requestFrame();
 
-  // Wait for all pipelines to be ready
-  if (
-    !grayscalePass?.ready ||
-    !pyramidBuilder?.ready ||
-    !opticalFlowPass?.ready ||
-    !heatmapPass?.ready ||
-    !compositePipeline
-  ) {
-    return;
-  }
-
   const frameStart = performance.now();
 
-  // 1. Import current camera frame to GPU texture
-  importFrame(device, capture);
+  // ── Layer 0: Draw video to the video canvas (2D) ──────────────
+  videoCtx.drawImage(capture.video, 0, 0, videoCanvas.width, videoCanvas.height);
 
-  // 2. Create command encoder
-  const encoder = device.createCommandEncoder({ label: 'frame-encoder' });
+  // ── GPU Pipeline: grayscale → pyramid → flow ──────────────────
+  // Only run GPU pipeline if all stages are ready
+  const gpuReady =
+    grayscalePass?.ready &&
+    pyramidBuilder?.ready &&
+    opticalFlowPass?.ready &&
+    heatmapPass?.ready;
 
-  // 3. Grayscale + downsample
-  grayscalePass.encode(encoder, capture.frameTexture);
+  if (gpuReady) {
+    // Import frame to GPU (for compute pipeline)
+    importFrame(device, capture);
 
-  // 4. Build pyramid
-  pyramidBuilder.encode(encoder, grayscalePass.outputTexture);
+    const encoder = device.createCommandEncoder({ label: 'frame-encoder' });
 
-  // 5. Optical flow (if we have a previous frame)
-  if (hasFirstFrame) {
-    opticalFlowPass.encode(
-      encoder,
-      pyramidBuilder.currentPyramid[0],
-      pyramidBuilder.previousPyramid[0]
-    );
+    // Grayscale + downsample
+    grayscalePass.encode(encoder, capture.frameTexture);
 
-    // Copy flow for readback (for vector arrows)
-    if (!isReadingBack) {
-      opticalFlowPass.encodeCopyForReadback(encoder);
+    // Build pyramid
+    pyramidBuilder.encode(encoder, grayscalePass.outputTexture);
+
+    // Optical flow (if we have a previous frame)
+    if (hasFirstFrame) {
+      opticalFlowPass.encode(
+        encoder,
+        pyramidBuilder.currentPyramid[0],
+        pyramidBuilder.previousPyramid[0]
+      );
+
+      // Copy flow for readback (for vector arrows)
+      if (!isReadingBack) {
+        opticalFlowPass.encodeCopyForReadback(encoder);
+      }
+    }
+
+    // ── Layer 1: Heatmap on transparent WebGPU canvas ──────────
+    const canvasView = context.getCurrentTexture().createView();
+
+    const renderPass = encoder.beginRenderPass({
+      label: 'heatmap-pass',
+      colorAttachments: [
+        {
+          view: canvasView,
+          clearValue: { r: 0, g: 0, b: 0, a: 0 }, // Transparent clear
+          loadOp: 'clear',
+          storeOp: 'store',
+        },
+      ],
+    });
+
+    // Draw heatmap overlay (alpha blended, transparent background)
+    if (hasFirstFrame) {
+      heatmapPass.encodeInPass(renderPass, opticalFlowPass.flowTexture);
+    }
+
+    renderPass.end();
+
+    // Submit
+    device.queue.submit([encoder.finish()]);
+
+    // Swap pyramids for next frame
+    pyramidBuilder.swapPyramids();
+    hasFirstFrame = true;
+
+    // ── Layer 2: Read back flow for vector arrows ──────────────
+    if (hasFirstFrame && !isReadingBack && vectorOverlay.enabled) {
+      isReadingBack = true;
+      opticalFlowPass
+        .readFlowData()
+        .then((flowData) => {
+          vectorOverlay.setFlowData(flowData);
+          vectorOverlay.draw();
+          isReadingBack = false;
+        })
+        .catch(() => {
+          isReadingBack = false;
+        });
     }
   }
 
-  // 6. Render: composite video + heatmap
-  const canvasView = context.getCurrentTexture().createView();
-
-  // First render pass: draw video
-  const compositeBindGroup = device.createBindGroup({
-    layout: compositePipeline.getBindGroupLayout(0),
-    entries: [
-      { binding: 0, resource: capture.frameTexture.createView() },
-      { binding: 1, resource: compositeSampler },
-    ],
-  });
-
-  // Use a single render pass with load: 'clear' for video, then heatmap on top
-  const renderPass = encoder.beginRenderPass({
-    label: 'composite-pass',
-    colorAttachments: [
-      {
-        view: canvasView,
-        clearValue: { r: 0, g: 0, b: 0, a: 1 },
-        loadOp: 'clear',
-        storeOp: 'store',
-      },
-    ],
-  });
-
-  // Draw video
-  renderPass.setPipeline(compositePipeline);
-  renderPass.setBindGroup(0, compositeBindGroup);
-  renderPass.draw(3);
-
-  // Draw heatmap overlay (alpha blended on top)
-  if (hasFirstFrame) {
-    heatmapPass.encodeInPass(renderPass, opticalFlowPass.flowTexture);
-  }
-
-  renderPass.end();
-
-  // 7. Submit
-  device.queue.submit([encoder.finish()]);
-
-  // 8. Swap pyramids for next frame
-  pyramidBuilder.swapPyramids();
-  hasFirstFrame = true;
-
-  // 9. Read back flow for vector arrows (async, non-blocking)
-  if (hasFirstFrame && !isReadingBack && vectorOverlay.enabled) {
-    isReadingBack = true;
-    opticalFlowPass
-      .readFlowData()
-      .then((flowData) => {
-        vectorOverlay.setFlowData(flowData);
-        vectorOverlay.draw();
-        isReadingBack = false;
-      })
-      .catch(() => {
-        isReadingBack = false;
-      });
-  }
-
-  // 10. FPS counter
+  // ── FPS counter ──────────────────────────────────────────────────
   fpsFrameCount++;
   const now = performance.now();
   const elapsed = now - lastFpsTime;

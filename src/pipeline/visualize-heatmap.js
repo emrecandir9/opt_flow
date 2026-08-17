@@ -1,6 +1,6 @@
 /**
  * Heatmap visualization pass.
- * Renders optical flow as an HSV color-wheel heatmap overlaid on the video.
+ * Renders optical flow as a Thermal Speed Glow or HSV color-wheel heatmap overlaid on the video.
  */
 
 export class HeatmapPass {
@@ -11,13 +11,14 @@ export class HeatmapPass {
   constructor(device, canvasFormat) {
     this.device = device;
     this.canvasFormat = canvasFormat;
+    this.enabled = true;
 
-    // Heatmap params uniform: maxSpeed, opacity
+    // Heatmap params uniform: maxSpeed, opacity, colorMode, _pad (16 bytes)
     this.uniformBuffer = device.createBuffer({
-      size: 8,
+      size: 16,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
-    this.setParams(6.0, 0.7);
+    this.setParams(6.0, 0.7, 0.0); // Default to Thermal Speed Glow
 
     this.pipeline = null;
     this._initPipeline();
@@ -66,12 +67,13 @@ export class HeatmapPass {
    * Update heatmap parameters.
    * @param {number} maxSpeed
    * @param {number} opacity
+   * @param {number} colorMode - 0.0 for Thermal Speed Glow, 1.0 for HSV Wheel
    */
-  setParams(maxSpeed, opacity) {
+  setParams(maxSpeed, opacity, colorMode = 0.0) {
     this.device.queue.writeBuffer(
       this.uniformBuffer,
       0,
-      new Float32Array([maxSpeed, opacity])
+      new Float32Array([maxSpeed, opacity, colorMode, 0.0])
     );
   }
 
@@ -80,12 +82,12 @@ export class HeatmapPass {
   }
 
   /**
-   * Encode the heatmap render pass (draws on top of existing canvas content).
+   * Encode the heatmap render pass.
    * @param {GPURenderPassEncoder} renderPass - An active render pass
    * @param {GPUTexture} flowTexture - The flow field texture (rg32float)
    */
   encodeInPass(renderPass, flowTexture) {
-    if (!this.pipeline) return;
+    if (!this.pipeline || !this.enabled) return;
 
     const bindGroup = this.device.createBindGroup({
       label: 'heatmap-bind-group',

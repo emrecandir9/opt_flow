@@ -1,6 +1,6 @@
 // Heatmap visualization — vertex + fragment shader
-// Renders a full-screen quad sampling the flow texture.
-// Maps (vx, vy) → HSV color wheel, alpha ∝ magnitude.
+// Renders full-screen quad with bilinear-filtered optical flow.
+// Supports Thermal Speed Glow and HSV Direction Wheel color modes.
 
 struct VertexOutput {
   @builtin(position) position: vec4f,
@@ -25,6 +25,8 @@ fn vs_main(@builtin(vertex_index) vertexIndex: u32) -> VertexOutput {
 struct HeatmapParams {
   maxSpeed:     f32,  // Maximum expected speed for normalization
   opacity:      f32,  // Overall opacity multiplier
+  colorMode:    f32,  // 0.0 = Thermal Speed Glow, 1.0 = HSV Direction Wheel
+  _pad:         f32,
 };
 
 @group(0) @binding(0) var flowTexture: texture_2d<f32>;
@@ -55,29 +57,59 @@ fn hsv2rgb(h: f32, s: f32, v: f32) -> vec3f {
   return rgb + m;
 }
 
+// Thermal Speed Glow (Cyberpunk Inferno: Transparent -> Deep Cyan -> Vivid Magenta -> Bright Gold)
+fn thermalGlow(t: f32) -> vec3f {
+  let c0 = vec3f(0.0, 0.8, 1.0);  // Cyan
+  let c1 = vec3f(0.85, 0.1, 0.9); // Vivid Magenta
+  let c2 = vec3f(1.0, 0.85, 0.2); // Glowing Gold
+
+  if (t < 0.5) {
+    return mix(c0, c1, t * 2.0);
+  } else {
+    return mix(c1, c2, (t - 0.5) * 2.0);
+  }
+}
+
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4f {
-  let dims = textureDimensions(flowTexture);
-  let clampedUV = clamp(in.uv, vec2f(0.0), vec2f(1.0));
-  let coord = vec2u(clamp(vec2f(dims) * clampedUV, vec2f(0.0), vec2f(dims) - 1.0));
-  let flow = textureLoad(flowTexture, coord, 0).rg;
+  let dims = vec2f(textureDimensions(flowTexture));
+  
+  // Bilinear interpolation for smooth, silky non-blocky flow contours
+  let samplePos = in.uv * dims - 0.5;
+  let i0 = vec2u(clamp(vec2i(floor(samplePos)), vec2i(0), vec2i(dims) - 1));
+  let i1 = vec2u(clamp(vec2i(ceil(samplePos)), vec2i(0), vec2i(dims) - 1));
+  let f = fract(samplePos);
+
+  let f00 = textureLoad(flowTexture, vec2u(i0.x, i0.y), 0).rg;
+  let f10 = textureLoad(flowTexture, vec2u(i1.x, i0.y), 0).rg;
+  let f01 = textureLoad(flowTexture, vec2u(i0.x, i1.y), 0).rg;
+  let f11 = textureLoad(flowTexture, vec2u(i1.x, i1.y), 0).rg;
+
+  let flow = mix(mix(f00, f10, f.x), mix(f01, f11, f.x), f.y);
 
   let vx = flow.x;
   let vy = flow.y;
-
   let magnitude = length(vec2f(vx, vy));
-  if (magnitude < 0.2) {
+
+  if (magnitude < 0.25) {
     return vec4f(0.0, 0.0, 0.0, 0.0);
   }
 
-  let angle = atan2(vy, vx); // -π to π
-  let hue = (angle / 3.14159265 + 1.0) * 180.0;
   let normMag = clamp(magnitude / params.maxSpeed, 0.0, 1.0);
+  var rgb: vec3f;
 
-  // Vibrant saturated HSV color
-  let rgb = hsv2rgb(hue, 0.95, 1.0);
-  let alpha = clamp((0.45 + 0.55 * normMag) * params.opacity, 0.0, 0.95);
+  if (params.colorMode < 0.5) {
+    // Mode 0: Thermal Speed Glow
+    rgb = thermalGlow(normMag);
+  } else {
+    // Mode 1: HSV Direction Wheel
+    let angle = atan2(vy, vx);
+    let hue = (angle / 3.14159265 + 1.0) * 180.0;
+    rgb = hsv2rgb(hue, 0.95, 1.0);
+  }
 
-  // Output premultiplied RGBA for premultiplied canvas compositing
+  let alpha = clamp((0.35 + 0.65 * normMag) * params.opacity, 0.0, 0.95);
+
+  // Premultiplied alpha output
   return vec4f(rgb * alpha, alpha);
 }

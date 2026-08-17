@@ -1,28 +1,28 @@
 /**
- * Main entry point — sets up WebGPU, camera, pipeline stages, and animation loop.
+ * Main entry point — sets up WebGPU, camera, pipeline stages, and multi-mode interactive visualizers.
  *
- * Rendering architecture (3 layers):
- *   Layer 0 (bottom): video-canvas  — 2D context drawing camera feed
- *   Layer 1 (middle): gpu-canvas    — WebGPU transparent canvas for heatmap overlay
- *   Layer 2 (top):    arrow-canvas  — 2D context drawing vector arrows
+ * Visualizer Modes:
+ *   1. ✨ particles   — 3,500 glowing embers pushed by motion force-fields
+ *   2. 🌊 streamlines — Aerodynamic wind-tunnel flow ribbons
+ *   3. 🔥 thermal     — Smooth non-blocky speed heatmap silhouette
+ *   4. 🎯 arrows      — Sleek quiver plot with circular direction compass
  */
 
 import { initWebGPU } from './webgpu-context.js';
 import { startCapture, importFrame, stopCapture } from './capture.js';
 import { GrayscalePass } from './pipeline/grayscale.js';
-import { PyramidBuilder } from './pipeline/pyramid.js';
 import { OpticalFlowPass } from './pipeline/optical-flow.js';
 import { HeatmapPass } from './pipeline/visualize-heatmap.js';
 import { VectorOverlay } from './pipeline/visualize-vectors.js';
+import { ParticleSystem } from './pipeline/visualize-particles.js';
 import { createGrayscaleTexture } from './utils/texture-utils.js';
 
 // ── Configuration ──────────────────────────────────────────────────
 const WORKING_WIDTH = 480;
 const WORKING_HEIGHT = 270;
-const PYRAMID_LEVELS = 4;
 const BLOCK_SIZE = 8;
-const SEARCH_RADIUS = 12;
-const ARROW_GRID_SPACING = 12;
+const SEARCH_RADIUS = 9;
+const ARROW_GRID_SPACING = 14;
 
 // ── DOM Elements ───────────────────────────────────────────────────
 const videoCanvas = document.getElementById('video-canvas');
@@ -32,13 +32,15 @@ const video = document.getElementById('camera-video');
 const startBtn = document.getElementById('start-btn');
 const stopBtn = document.getElementById('stop-btn');
 const errorMsg = document.getElementById('error-msg');
+const modeBar = document.getElementById('mode-bar');
 const controls = document.getElementById('controls');
 const fpsValue = document.getElementById('fps-value');
 const flowTimeEl = document.getElementById('flow-time');
 const resValue = document.getElementById('res-value');
-const heatmapOpacityInput = document.getElementById('heatmap-opacity');
-const arrowsToggle = document.getElementById('arrows-toggle');
-const sensitivitySelect = document.getElementById('sensitivity-select');
+const compassNeedle = document.getElementById('compass-needle');
+const compassSpeed = document.getElementById('compass-speed');
+const compassLabel = document.getElementById('compass-label');
+const intensitySlider = document.getElementById('intensity-slider');
 const simBtn = document.getElementById('sim-btn');
 
 // ── 2D contexts ────────────────────────────────────────────────────
@@ -47,7 +49,9 @@ const videoCtx = videoCanvas.getContext('2d');
 // ── State ──────────────────────────────────────────────────────────
 let device, context, canvasFormat;
 let capture;
-let grayscalePass, prevGrayscaleTexture, pyramidBuilder, opticalFlowPass, heatmapPass, vectorOverlay;
+let grayscalePass, prevGrayscaleTexture, opticalFlowPass, heatmapPass, vectorOverlay, particleSystem;
+let currentMode = 'particles'; // 'particles' | 'streamlines' | 'thermal' | 'arrows'
+let currentIntensity = 0.8;
 let frameCount = 0;
 let hasFirstFrame = false;
 let isReadingBack = false;
@@ -84,15 +88,56 @@ function resizeCanvases() {
     });
   }
 
-  if (vectorOverlay) {
-    vectorOverlay.resize(w, h);
+  if (vectorOverlay) vectorOverlay.resize(w, h);
+  if (particleSystem) particleSystem.resize(w, h);
+}
+
+// ── Mode Switching ─────────────────────────────────────────────────
+function setMode(mode) {
+  currentMode = mode;
+
+  // Update tab buttons
+  document.querySelectorAll('.mode-btn').forEach((btn) => {
+    btn.classList.toggle('active', btn.dataset.mode === mode);
+  });
+
+  if (!heatmapPass || !vectorOverlay || !particleSystem) return;
+
+  // Configure sub-systems
+  if (mode === 'particles') {
+    particleSystem.enabled = true;
+    vectorOverlay.enabled = false;
+    heatmapPass.enabled = false;
+    compassLabel.textContent = 'Force Field';
+  } else if (mode === 'streamlines') {
+    vectorOverlay.enabled = true;
+    vectorOverlay.mode = 'streamlines';
+    particleSystem.enabled = false;
+    heatmapPass.enabled = false;
+    compassLabel.textContent = 'Wind Flow';
+  } else if (mode === 'thermal') {
+    heatmapPass.enabled = true;
+    heatmapPass.setParams(6.0, currentIntensity, 0.0); // Thermal Speed Glow
+    vectorOverlay.enabled = false;
+    particleSystem.enabled = false;
+    compassLabel.textContent = 'Speed Heatmap';
+  } else if (mode === 'arrows') {
+    vectorOverlay.enabled = true;
+    vectorOverlay.mode = 'arrows';
+    heatmapPass.enabled = true;
+    heatmapPass.setParams(6.0, currentIntensity * 0.4, 1.0); // Subtle HSV
+    particleSystem.enabled = false;
+    compassLabel.textContent = 'Quiver Vectors';
   }
+
+  // Clear 2D overlay on switch
+  const overlayCtx = arrowCanvas.getContext('2d');
+  overlayCtx.clearRect(0, 0, arrowCanvas.width, arrowCanvas.height);
 }
 
 // ── Main Init ──────────────────────────────────────────────────────
 async function init() {
   try {
-    // Init WebGPU (only once)
     if (!device) {
       const gpuInit = await initWebGPU(gpuCanvas);
       device = gpuInit.device;
@@ -123,8 +168,6 @@ async function init() {
       'prev-grayscale'
     );
 
-    pyramidBuilder = new PyramidBuilder(device, WORKING_WIDTH, WORKING_HEIGHT, PYRAMID_LEVELS);
-
     opticalFlowPass = new OpticalFlowPass(
       device,
       WORKING_WIDTH,
@@ -143,42 +186,52 @@ async function init() {
     );
     vectorOverlay.resize(arrowCanvas.width, arrowCanvas.height);
 
+    particleSystem = new ParticleSystem(
+      arrowCanvas,
+      WORKING_WIDTH,
+      WORKING_HEIGHT,
+      3500
+    );
+    particleSystem.resize(arrowCanvas.width, arrowCanvas.height);
+
     // Update UI
     resValue.textContent = `${WORKING_WIDTH}×${WORKING_HEIGHT}`;
+    modeBar.style.display = 'flex';
     controls.style.display = 'flex';
     startBtn.style.display = 'none';
     stopBtn.style.display = 'inline-block';
 
-    // Bind UI controls
-    document.getElementById('heatmap-opacity')?.addEventListener('input', (e) => {
-      const opacity = parseInt(e.target.value) / 100;
-      heatmapPass?.setParams(6.0, opacity);
+    // Set initial mode
+    setMode('particles');
+
+    // Bind Mode Switcher tabs
+    document.querySelectorAll('.mode-btn').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        setMode(btn.dataset.mode);
+      });
     });
 
-    document.getElementById('arrows-toggle')?.addEventListener('change', (e) => {
-      if (vectorOverlay) {
-        vectorOverlay.enabled = e.target.value === 'on';
-        if (!vectorOverlay.enabled) {
-          vectorOverlay.draw(); // Clear arrows
-        }
+    // Bind Controls
+    intensitySlider?.addEventListener('input', (e) => {
+      currentIntensity = parseInt(e.target.value) / 100;
+      if (currentMode === 'thermal') {
+        heatmapPass?.setParams(6.0, currentIntensity, 0.0);
+      } else if (currentMode === 'arrows') {
+        heatmapPass?.setParams(6.0, currentIntensity * 0.4, 1.0);
       }
     });
 
-    const simBtnEl = document.getElementById('sim-btn');
-    simBtnEl?.addEventListener('click', () => {
+    simBtn?.addEventListener('click', () => {
       simMode = !simMode;
-      simBtnEl.textContent = simMode ? 'Stop Test Motion' : 'Test Motion Overlay';
-      simBtnEl.style.background = simMode ? '#4f46e5' : '#374151';
+      simBtn.textContent = simMode ? 'Stop Motion Target' : 'Test Motion Target';
+      simBtn.style.background = simMode ? 'rgba(99, 102, 241, 0.3)' : 'rgba(255, 255, 255, 0.05)';
+      simBtn.style.borderColor = simMode ? '#818cf8' : 'rgba(255, 255, 255, 0.12)';
     });
 
     // Wait for async pipeline compilation
-    await new Promise((r) => setTimeout(r, 500));
+    await new Promise((r) => setTimeout(r, 400));
 
-    console.log('Pipeline ready:', {
-      grayscale: grayscalePass.ready,
-      opticalFlow: opticalFlowPass.ready,
-      heatmap: heatmapPass.ready,
-    });
+    console.log('Pipelines ready.');
 
     // Start frame loop
     isRunning = true;
@@ -200,27 +253,27 @@ function stop() {
     capture = null;
   }
 
-  // Clear canvases
   videoCtx.clearRect(0, 0, videoCanvas.width, videoCanvas.height);
-  if (vectorOverlay) {
-    vectorOverlay.destroy();
-  }
+  if (vectorOverlay) vectorOverlay.destroy();
+  if (particleSystem) particleSystem.destroy();
 
-  // Reset UI
   startBtn.style.display = 'inline-block';
   startBtn.disabled = false;
   startBtn.textContent = 'Start Camera';
   stopBtn.style.display = 'none';
+  modeBar.style.display = 'none';
   controls.style.display = 'none';
   fpsValue.textContent = '—';
   flowTimeEl.textContent = '—';
   resValue.textContent = '—';
+  compassSpeed.textContent = '0.0 px/f';
+  compassNeedle.style.transform = 'translate(-50%, -100%) rotate(0deg)';
   hasFirstFrame = false;
   isReadingBack = false;
   simMode = false;
   if (simBtn) {
-    simBtn.textContent = 'Test Motion Overlay';
-    simBtn.style.background = '#374151';
+    simBtn.textContent = 'Test Motion Target';
+    simBtn.style.background = 'rgba(255, 255, 255, 0.05)';
   }
 }
 
@@ -243,12 +296,12 @@ function onFrame() {
 
   const frameStart = performance.now();
 
-  // ── Layer 0: Draw video to the video canvas (2D) ──────────────
+  // ── Layer 0: Draw video to 2D canvas ──────────────────────────
   videoCtx.drawImage(capture.video, 0, 0, videoCanvas.width, videoCanvas.height);
 
-  // If simulation mode is active, draw an animated moving target onto canvas
+  // If simulation mode is active, draw animated test target
   if (simMode) {
-    const t = performance.now() * 0.0006;
+    const t = performance.now() * 0.0007;
     const sx = (Math.sin(t * 1.5) * 0.35 + 0.5) * videoCanvas.width;
     const sy = (Math.cos(t * 1.2) * 0.3 + 0.5) * videoCanvas.height;
 
@@ -278,18 +331,16 @@ function onFrame() {
     capture.captureCtx.restore();
   }
 
-  // ── GPU Pipeline: grayscale → flow ────────────────────────────
+  // ── GPU Pipeline: Grayscale → Optical Flow → Heatmap ──────────
   const gpuReady =
     grayscalePass?.ready &&
     opticalFlowPass?.ready &&
     heatmapPass?.ready;
 
   if (gpuReady) {
-    // Import frame to GPU
     if (!simMode) {
       importFrame(device, capture);
     } else {
-      // In sim mode, captureCtx already has the combined frame
       const imgData = capture.captureCtx.getImageData(0, 0, capture.cameraWidth, capture.cameraHeight);
       device.queue.writeTexture(
         { texture: capture.frameTexture },
@@ -301,10 +352,10 @@ function onFrame() {
 
     const encoder = device.createCommandEncoder({ label: 'frame-encoder' });
 
-    // 1. Grayscale + downsample
+    // 1. Grayscale conversion
     grayscalePass.encode(encoder, capture.frameTexture);
 
-    // 2. Optical flow (compare current crisp grayscale with previous frame grayscale)
+    // 2. Optical flow computation
     if (hasFirstFrame) {
       opticalFlowPass.encode(
         encoder,
@@ -312,13 +363,12 @@ function onFrame() {
         prevGrayscaleTexture
       );
 
-      // Copy flow for readback (for vector arrows)
       if (!isReadingBack) {
         opticalFlowPass.encodeCopyForReadback(encoder);
       }
     }
 
-    // 3. ── Layer 1: Heatmap on transparent WebGPU canvas ──────────
+    // 3. Layer 1: Heatmap pass on transparent WebGPU canvas
     const canvasView = context.getCurrentTexture().createView();
 
     const renderPass = encoder.beginRenderPass({
@@ -333,13 +383,13 @@ function onFrame() {
       ],
     });
 
-    if (hasFirstFrame) {
+    if (hasFirstFrame && heatmapPass.enabled) {
       heatmapPass.encodeInPass(renderPass, opticalFlowPass.flowTexture);
     }
 
     renderPass.end();
 
-    // 4. Save current grayscale into prevGrayscaleTexture for next frame
+    // 4. Save current grayscale into prevGrayscaleTexture
     encoder.copyTextureToTexture(
       { texture: grayscalePass.outputTexture },
       { texture: prevGrayscaleTexture },
@@ -349,24 +399,38 @@ function onFrame() {
     device.queue.submit([encoder.finish()]);
     hasFirstFrame = true;
 
-    // 5. ── Layer 2: Read back flow for vector arrows ──────────────
-    if (hasFirstFrame && !isReadingBack && vectorOverlay.enabled) {
+    // 5. Layer 2: Readback for Particles, Streamlines, and Arrows ──
+    if (hasFirstFrame && !isReadingBack) {
       isReadingBack = true;
       opticalFlowPass
         .readFlowData()
         .then((flowData) => {
-          vectorOverlay.setFlowData(flowData);
-          vectorOverlay.draw();
+          // Update Particle System
+          if (currentMode === 'particles') {
+            particleSystem.setFlowData(flowData);
+            particleSystem.update(1.0);
+            particleSystem.draw();
+          } else if (currentMode === 'streamlines' || currentMode === 'arrows') {
+            vectorOverlay.setFlowData(flowData);
+            vectorOverlay.draw();
+          }
+
+          // Update Motion Direction Compass HUD Widget
+          updateCompassHUD(flowData);
+
           isReadingBack = false;
         })
-        .catch((err) => {
-          console.error('Flow readback error:', err);
+        .catch(() => {
           isReadingBack = false;
         });
+    } else if (currentMode === 'particles') {
+      // Keep particles drifting smoothly even on non-readback frames
+      particleSystem.update(1.0);
+      particleSystem.draw();
     }
   }
 
-  // ── FPS counter ──────────────────────────────────────────────────
+  // ── FPS Counter ──────────────────────────────────────────────────
   fpsFrameCount++;
   const now = performance.now();
   const elapsed = now - lastFpsTime;
@@ -381,6 +445,37 @@ function onFrame() {
   frameCount++;
 }
 
+// ── Compass HUD Updater ────────────────────────────────────────────
+function updateCompassHUD(flowData) {
+  if (!flowData) return;
+
+  let sumVx = 0, sumVy = 0, count = 0, maxSpeed = 0;
+
+  for (let i = 0; i < flowData.length; i += 8) {
+    const vx = flowData[i];
+    const vy = flowData[i + 1];
+    const speed = Math.sqrt(vx * vx + vy * vy);
+    if (speed > 0.3) {
+      sumVx += vx;
+      sumVy += vy;
+      count++;
+      if (speed > maxSpeed) maxSpeed = speed;
+    }
+  }
+
+  if (count > 5) {
+    const avgVx = sumVx / count;
+    const avgVy = sumVy / count;
+    const angleRad = Math.atan2(avgVy, avgVx);
+    const angleDeg = (angleRad * 180) / Math.PI;
+
+    compassNeedle.style.transform = `translate(-50%, -100%) rotate(${angleDeg + 90}deg)`;
+    compassSpeed.textContent = `${maxSpeed.toFixed(1)} px/f`;
+  } else {
+    compassSpeed.textContent = '0.0 px/f';
+  }
+}
+
 // ── Button Handlers ────────────────────────────────────────────────
 startBtn.addEventListener('click', () => {
   startBtn.disabled = true;
@@ -393,7 +488,6 @@ stopBtn.addEventListener('click', () => {
   stop();
 });
 
-// Feature detection on load
 if (!navigator.gpu) {
   showError(
     'WebGPU is not supported in this browser. Please use Chrome 113+ or Edge 113+ with WebGPU enabled.'

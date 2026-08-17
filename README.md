@@ -1,32 +1,43 @@
-# Real-Time Camera Optical Flow & Motion Vector Canvas
+# Real-Time Camera Optical Flow & Motion Visualizer
 
-A browser-based application that captures a live webcam feed and computes dense optical flow (per-pixel motion vectors) between consecutive frames on the GPU using **WebGPU compute shaders**. The result is rendered as two overlays on top of the live video:
+A high-performance browser application that captures a live webcam feed and computes dense optical flow (per-pixel motion vectors) between consecutive frames directly on the GPU using **WebGPU compute shaders**.
 
-- **Velocity Heatmap** — HSV color-wheel mapping of flow direction and magnitude
-- **Vector Field** — sparse-sampled arrow quiver plot showing motion direction
+🌐 **Live Demo:** [https://emrecandir9.github.io/opt_flow/](https://emrecandir9.github.io/opt_flow/)
 
-## Features
+---
 
-- Real-time GPU-accelerated optical flow via WebGPU compute shaders
-- Block-matching flow algorithm (8×8 blocks, ±8px search)
-- 4-level Gaussian image pyramid with separable blur
-- HSV color-wheel heatmap visualization with alpha blending
-- Sparse vector arrow overlay via 2D Canvas readback
-- Working resolution downsampling (480×270) for performance
-- FPS counter and UI controls
-- No build step — vanilla JS + ES modules
+## 4 Interactive Visualizer Modes
 
-## Requirements
+1. **✨ Magical Particles (Default)** — 3,500 glowing embers pushed and swirled by motion force fields with real-time speed streaks.
+2. **🌊 Fluid Streamlines** — Aerodynamic wind-tunnel flow ribbons tracing continuous motion paths.
+3. **🔥 Thermal Speed Glow** — Bilinear-smoothed speed heatmap (Cyan $\rightarrow$ Magenta $\rightarrow$ Gold) for intuitive velocity visualization without color wheel ambiguity.
+4. **🎯 Quiver Arrows + Compass HUD** — Directional arrow quiver plot paired with a live circular motion compass HUD displaying dominant movement angle and speed (px/frame).
 
-- **Browser:** Chrome 113+ or Edge 113+ (WebGPU support required)
-- **HTTPS or localhost** (required for camera access)
-- A webcam
+---
 
-## Getting Started
+## Key Features
+
+- **WebGPU Compute Pipeline:** GPU-accelerated block-matching optical flow running at 480×270 working resolution.
+- **Motion Threshold Slider (0.2 px – 10.0 px):** Cleanly suppresses camera sensor noise, micro-jitter, and lighting variations so only intentional gestures are shown.
+- **3-Layer Compositing Stack:** High-performance overlay of video feed, WebGPU transparent heatmap shader, and 2D canvas particle/vector engine.
+- **Instant Controls:** Real-time mode switching, intensity adjustment, and an animated test motion target generator.
+- **Zero Build Step:** Built entirely in Vanilla JavaScript (ES modules), HTML, CSS, and WGSL shaders.
+
+---
+
+## Browser Requirements
+
+- **Chrome 113+** or **Edge 113+** (WebGPU support required)
+- **HTTPS or localhost** (required by browsers for camera access)
+- A webcam / front-facing camera
+
+---
+
+## Local Development
 
 1. Clone the repository:
    ```bash
-   git clone <repo-url>
+   git clone https://github.com/emrecandir9/opt_flow.git
    cd opt_flow
    ```
 
@@ -35,64 +46,37 @@ A browser-based application that captures a live webcam feed and computes dense 
    python3 -m http.server 8080
    ```
 
-3. Open `http://localhost:8080` in Chrome or Edge.
+3. Open `http://localhost:8080` in Chrome or Edge and click **"Start Camera"**.
 
-4. Click **"Start Camera"** and grant camera permissions.
-
-## Architecture
-
-```
-[Webcam] → video element
-   │
-   ▼
-[1] Import frame as GPUTexture (rgba8unorm)
-   │
-   ▼
-[2] Grayscale conversion + downsample → R32Float (480×270)
-   │
-   ▼
-[3] Build 4-level Gaussian image pyramid
-   │
-   ▼
-[4] Block-matching optical flow → RG32Float flow field
-   │
-   ▼
-[5] Visualization: HSV heatmap + vector arrows
-   │
-   ▼
-[6] Composite: video + heatmap (alpha) + arrows (overlay)
-```
+---
 
 ## Project Structure
 
-```
-├── index.html                  — App shell + UI
+```text
+├── index.html                     — Main UI & 3-layer canvas container
 ├── src/
-│   ├── main.js                — Entry point, animation loop
-│   ├── webgpu-context.js      — WebGPU device/adapter init
-│   ├── capture.js             — Camera setup, frame import
+│   ├── main.js                   — App orchestration, loop, mode switcher
+│   ├── webgpu-context.js         — WebGPU device/adapter initialization
+│   ├── capture.js                — Camera setup & GPU texture ingestion
 │   ├── pipeline/
-│   │   ├── grayscale.js       — Grayscale + downsample pass
-│   │   ├── pyramid.js         — Gaussian pyramid builder
-│   │   ├── optical-flow.js    — Block-matching flow
-│   │   ├── visualize-heatmap.js — HSV heatmap render
-│   │   └── visualize-vectors.js — Arrow overlay
+│   │   ├── grayscale.js          — GPU grayscale + downsample pass
+│   │   ├── pyramid.js            — Gaussian image pyramid builder
+│   │   ├── optical-flow.js       — Block-matching flow compute orchestration
+│   │   ├── visualize-heatmap.js  — WebGPU heatmap render pass
+│   │   ├── visualize-particles.js — 3,500 interactive force-field particles
+│   │   └── visualize-vectors.js  — Streamline ribbons & quiver arrows
 │   ├── shaders/
-│   │   ├── grayscale.wgsl
-│   │   ├── gaussian-blur.wgsl
-│   │   ├── downsample.wgsl
-│   │   ├── block-match.wgsl
-│   │   ├── heatmap.wgsl
-│   │   └── composite.wgsl
+│   │   ├── grayscale.wgsl        — BT.601 luma conversion
+│   │   ├── gaussian-blur.wgsl    — Separable 5-tap Gaussian blur
+│   │   ├── downsample.wgsl       — 2× box downsampler
+│   │   ├── block-match.wgsl      — GPU block-matching optical flow compute
+│   │   └── heatmap.wgsl          — Bilinear thermal glow & HSV fragment shader
 │   └── utils/
-│       └── texture-utils.js   — Texture creation helpers
-├── webgpu-optical-flow-spec.md — Full technical spec
+│       └── texture-utils.js      — GPU texture creation helpers
 └── README.md
 ```
 
-## Performance
-
-Target: ≥24 fps at 480×270 working resolution on a mid-range laptop GPU.
+---
 
 ## License
 
